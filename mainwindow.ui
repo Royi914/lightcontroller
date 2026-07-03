@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry"><rect><x>0</x><y>0</y><width>1280</width><height>800</height></rect></property>
+  <property name="windowTitle"><string>Light Controller</string></property>
+
+  <!-- 菜单栏 -->
+  <widget class="QMenuBar" name="menubar">
+   <widget class="QMenu" name="menuFile"><property name="title"><string>文件</string></property>
+    <addaction name="actionNew"/><addaction name="actionOpen"/>
+    <addaction name="actionSave"/><addaction name="actionSaveAs"/>
+    <addaction name="separator"/><addaction name="actionExit"/>
+   </widget>
+   <widget class="QMenu" name="menuFixture"><property name="title"><string>灯库</string></property></widget>
+   <widget class="QMenu" name="menuAddress"><property name="title"><string>地址码</string></property></widget>
+   <widget class="QMenu" name="menuProgram"><property name="title"><string>程序</string></property></widget>
+   <widget class="QMenu" name="menuWindow"><property name="title"><string>窗口</string></property></widget>
+   <widget class="QMenu" name="menuTimeline"><property name="title"><string>时间线</string></property></widget>
+   <addaction name="menuFile"/><addaction name="menuFixture"/>
+   <addaction name="menuAddress"/><addaction name="menuProgram"/>
+   <addaction name="menuWindow"/><addaction name="menuTimeline"/>
+  </widget>
+
+  <!-- 中央 -->
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QHBoxLayout" name="rootLayout">
+
+    <!-- ===== 左侧面板 QStackedWidget ===== -->
+    <item>
+     <widget class="QFrame" name="leftPanel">
+      <property name="minimumSize"><size><width>260</width><height>0</height></size></property>
+      <property name="maximumSize"><size><width>360</width><height>16777215</height></size></property>
+      <layout class="QVBoxLayout" name="leftOuterLayout">
+       <property name="spacing"><number>0</number></property>
+       <property name="leftMargin"><number>0</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>0</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <item>
+        <widget class="QStackedWidget" name="leftStack">
+         <!-- ===== Page 0: 灯库模式 ===== -->
+         <widget class="QWidget" name="pageLibrary">
+          <layout class="QVBoxLayout" name="pageLibraryLayout">
+           <property name="spacing"><number>4</number></property>
+           <!-- 灯库 -->
+           <item>
+            <widget class="QGroupBox" name="libraryGroup">
+             <property name="title"><string>灯库（拖到右侧添加）</string></property>
+             <layout class="QVBoxLayout" name="libraryLayout">
+              <item><widget class="QLineEdit" name="librarySearch"><property name="placeholderText"><string>搜索灯具型号...</string></property><property name="clearButtonEnabled"><bool>true</bool></property></widget></item>
+              <item>
+               <layout class="QHBoxLayout" name="libraryBtnLayout">
+                <item><widget class="QPushButton" name="addFixtureBtn"><property name="text"><string>+ 添加</string></property></widget></item>
+                <item><widget class="QPushButton" name="removeFixtureBtn"><property name="text"><string>- 删除</string></property></widget></item>
+               </layout>
+              </item>
+              <item><widget class="DragLibraryList" name="libraryList"/></item>
+             </layout>
+            </widget>
+           </item>
+           <!-- 已添加灯具 -->
+           <item>
+            <widget class="QGroupBox" name="fixtureGroup">
+             <property name="title"><string>已添加灯具</string></property>
+             <layout class="QVBoxLayout" name="fixtureGroupLayout">
+              <item><widget class="QListWidget" name="fixtureList"/></item>
+             </layout>
+            </widget>
+           </item>
+           <!-- 输出 -->
+           <item>
+            <widget class="QGroupBox" name="outputGroup">
+             <property name="title"><string>输出方式</string></property>
+             <layout class="QVBoxLayout" name="outputLayout">
+              <item><widget class="QRadioButton" name="artnetRadio"><property name="text"><string>Art-Net（无线）</string></property><property name="checked"><bool>true</bool></property></widget></item>
+              <item><layout class="QHBoxLayout" name="artnetConfig"><item><widget class="QLabel" name="artnetIpLabel"><property name="text"><string>IP:</string></property></widget></item><item><widget class="QLineEdit" name="artnetIpEdit"><property name="text"><string>192.168.1.255</string></property></widget></item></layout></item>
+              <item><widget class="QRadioButton" name="dmxRadio"><property name="text"><string>DMX USB（有线）</string></property></widget></item>
+              <item><widget class="QPushButton" name="connectButton"><property name="text"><string>连接</string></property></widget></item>
+             </layout>
+            </widget>
+           </item>
+           <item><spacer name="pageLibSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property></spacer></item>
+          </layout>
+         </widget>
+
+         <!-- ===== Page 1: 控制模式 ===== -->
+         <widget class="QWidget" name="pageControl">
+          <layout class="QVBoxLayout" name="pageControlLayout">
+           <property name="spacing"><number>4</number></property>
+           <!-- 返回 + 灯具名 -->
+           <item>
+            <layout class="QHBoxLayout" name="controlHeader">
+             <item><widget class="QPushButton" name="backButton"><property name="text"><string>← 返回</string></property></widget></item>
+             <item><widget class="QLabel" name="controlTitle"><property name="text"><string>控制</string></property><property name="styleSheet"><string>font-weight:bold;font-size:14px</string></property></widget></item>
+            </layout>
+           </item>
+           <!-- 控制参数 -->
+           <item>
+            <widget class="QGroupBox" name="paramGroup">
+             <property name="title"><string>参数</string></property>
+             <layout class="QVBoxLayout" name="paramLayout">
+              <item>
+               <layout class="QHBoxLayout" name="dimmerCtlLayout">
+                <item><widget class="QLabel" name="dimmerCtlLabel"><property name="text"><string>亮度</string></property><property name="minimumSize"><size><width>40</width><height>0</height></size></property></widget></item>
+                <item><widget class="QSlider" name="dimmerSlider"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="maximum"><number>255</number></property></widget></item>
+                <item><widget class="QSpinBox" name="dimmerSpinBox"><property name="maximum"><number>255</number></property><property name="maximumWidth"><number>55</number></property></widget></item>
+               </layout>
+              </item>
+              <item>
+               <layout class="QHBoxLayout" name="redCtlLayout">
+                <item><widget class="QLabel" name="redCtlLabel"><property name="text"><string>R</string></property><property name="minimumSize"><size><width>40</width><height>0</height></size></property></widget></item>
+                <item><widget class="QSlider" name="redSlider"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="maximum"><number>255</number></property></widget></item>
+                <item><widget class="QSpinBox" name="redSpinBox"><property name="maximum"><number>255</number></property><property name="maximumWidth"><number>55</number></property></widget></item>
+               </layout>
+              </item>
+              <item>
+               <layout class="QHBoxLayout" name="greenCtlLayout">
+                <item><widget class="QLabel" name="greenCtlLabel"><property name="text"><string>G</string></property><property name="minimumSize"><size><width>40</width><height>0</height></size></property></widget></item>
+                <item><widget class="QSlider" name="greenSlider"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="maximum"><number>255</number></property></widget></item>
+                <item><widget class="QSpinBox" name="greenSpinBox"><property name="maximum"><number>255</number></property><property name="maximumWidth"><number>55</number></property></widget></item>
+               </layout>
+              </item>
+              <item>
+               <layout class="QHBoxLayout" name="blueCtlLayout">
+                <item><widget class="QLabel" name="blueCtlLabel"><property name="text"><string>B</string></property><property name="minimumSize"><size><width>40</width><height>0</height></size></property></widget></item>
+                <item><widget class="QSlider" name="blueSlider"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="maximum"><number>255</number></property></widget></item>
+                <item><widget class="QSpinBox" name="blueSpinBox"><property name="maximum"><number>255</number></property><property name="maximumWidth"><number>55</number></property></widget></item>
+               </layout>
+              </item>
+             </layout>
+            </widget>
+           </item>
+           <!-- 全亮/黑场 -->
+           <item>
+            <layout class="QHBoxLayout" name="masterCtlLayout">
+             <item><widget class="QPushButton" name="fullButton"><property name="text"><string>全亮</string></property></widget></item>
+             <item><widget class="QPushButton" name="blackoutButton"><property name="text"><string>黑场</string></property></widget></item>
+            </layout>
+           </item>
+           <item><spacer name="pageCtlSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property></spacer></item>
+          </layout>
+         </widget>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+
+    <!-- ===== 右侧主区域 ===== -->
+    <item>
+     <widget class="QSplitter" name="rightSplitter">
+      <property name="orientation"><enum>Qt::Vertical</enum></property>
+      <!-- 2D 视图 -->
+      <widget class="QFrame" name="viewFrame">
+       <property name="frameShape"><enum>QFrame::StyledPanel</enum></property>
+       <property name="sizePolicy"><sizepolicy hsizetype="Expanding" vsizetype="Expanding"><horstretch>0</horstretch><verstretch>3</verstretch></sizepolicy></property>
+       <layout class="QVBoxLayout" name="viewLayout">
+        <property name="leftMargin"><number>0</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>0</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+        <item>
+         <widget class="DropView" name="graphicsView">
+          <property name="acceptDrops"><bool>true</bool></property>
+          <property name="styleSheet"><string>background:#1a1a2e</string></property>
+          <property name="renderHints"><set>QPainter::Antialiasing</set></property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+      <!-- 时间线 -->
+      <widget class="QFrame" name="timelineFrame">
+       <property name="frameShape"><enum>QFrame::StyledPanel</enum></property>
+       <property name="minimumSize"><size><width>0</width><height>200</height></size></property>
+       <layout class="QVBoxLayout" name="timelineLayout">
+        <item><widget class="QLabel" name="timelineHeader"><property name="text"><string>时间线</string></property><property name="styleSheet"><string>font-weight:bold;padding:4px;background:#333;color:#ccc</string></property></widget></item>
+        <item><widget class="QLabel" name="timelinePlaceholder"><property name="text"><string>时间线区域 - 在此拖放场景和追逐</string></property><property name="alignment"><set>Qt::AlignCenter</set></property><property name="styleSheet"><string>background:#2a2a2a;color:#666;font-size:14px</string></property></widget></item>
+       </layout>
+      </widget>
+     </widget>
+    </item>
+
+   </layout>
+  </widget>
+
+  <widget class="QStatusBar" name="statusbar">
+   <widget class="QLabel" name="statusLabel"><property name="text"><string>就绪 - 从灯库拖拽灯具到2D视图</string></property></widget>
+  </widget>
+
+  <action name="actionNew"><property name="text"><string>新建</string></property><property name="shortcut"><string>Ctrl+N</string></property></action>
+  <action name="actionOpen"><property name="text"><string>打开</string></property><property name="shortcut"><string>Ctrl+O</string></property></action>
+  <action name="actionSave"><property name="text"><string>保存</string></property><property name="shortcut"><string>Ctrl+S</string></property></action>
+  <action name="actionSaveAs"><property name="text"><string>另存为</string></property><property name="shortcut"><string>Ctrl+Shift+S</string></property></action>
+  <action name="actionExit"><property name="text"><string>退出</string></property><property name="shortcut"><string>Alt+F4</string></property></action>
+ <action name="actionAddressPage"><property name="text"><string>显示地址码</string></property></action>
+ </widget>
+ <resources/>
+ <connections/>
+ <customwidgets>
+  <customwidget>
+   <class>DropView</class>
+   <extends>QGraphicsView</extends>
+   <header>dropview.h</header>
+  </customwidget>
+  <customwidget>
+   <class>DragLibraryList</class>
+   <extends>QListWidget</extends>
+   <header>draglibrarylist.h</header>
+  </customwidget>
+ </customwidgets>
+</ui>
