@@ -1,0 +1,58 @@
+# 构建输出
+build/
+build2/
+light-build/
+light-build2/
+light-test/
+light-package/
+*.exe
+*.dll
+*.a
+*.o
+*.obj
+*.res
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+Makefile
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.ninja
+.ninja_deps
+.ninja_log
+
+# 自动生成
+*_autogen/
+lightprotocol_autogen/
+LightController_autogen/
+
+# Qt Creator
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.qmlproject.user
+qtcsettings.cmake
+CMakeLists.txt.user
+.qtcreator/
+.qtc_clangd/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 打包输出
+*.zip
+*.7z
+LightController-v*
