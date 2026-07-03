@@ -18,7 +18,6 @@ class Universe;
 class DMXUSBWidget;
 class FixtureItem;
 class AddressPage;
-class DomainPage;
 class LibraryPage;
 class Globe3D;
 class QStackedWidget;
@@ -91,7 +90,6 @@ private:
     QStackedWidget       *m_viewStack   = nullptr;
     AddressPage          *m_addressPage = nullptr;
     LibraryPage          *m_libraryPage = nullptr;
-    DomainPage           *m_domainPage  = nullptr;
     Globe3D              *m_globe3D     = nullptr;
     QPushButton          *m_btn2D       = nullptr;
     QPushButton          *m_btn3D       = nullptr;

@@ -2,15 +2,54 @@
 #define ADDRESSPAGE_H
 
 #include <QWidget>
-#include <QScrollArea>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QComboBox>
-#include <QPushButton>
+#include <QScrollArea>
 #include <QLabel>
-#include <QGridLayout>
+#include <QPushButton>
 #include <QLineEdit>
+#include <QSpinBox>
 #include <QFrame>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QMessageBox>
+#include <QFileDialog>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QMouseEvent>
+#include <QTimer>
+#include <QMap>
+#include <QSet>
+#include <functional>
+#include "Fixture.h"
+
+struct AddrEntry { QString model; int channels; };
+
+class AddrDomainDialog : public QDialog
+{
+    Q_OBJECT
+public:
+    explicit AddrDomainDialog(QWidget *parent = nullptr) : QDialog(parent) {
+        setWindowTitle("新建域"); setStyleSheet("background:#fff");
+        auto *root = new QVBoxLayout(this); auto *form = new QFormLayout;
+        m_model = new QLineEdit; m_model->setPlaceholderText("例如：万锐帕灯");
+        m_model->setStyleSheet("color:#000;border:1px solid #aaa;padding:4px");
+        form->addRow("灯型号：", m_model);
+        m_ch = new QSpinBox; m_ch->setRange(1,64); m_ch->setValue(8);
+        m_ch->setStyleSheet("color:#000;border:1px solid #aaa;padding:2px");
+        form->addRow("通道数：", m_ch);
+        root->addLayout(form);
+        auto *btns = new QDialogButtonBox; btns->addButton("创建", QDialogButtonBox::AcceptRole); btns->addButton(QDialogButtonBox::Cancel);
+        connect(btns, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(btns, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        root->addWidget(btns);
+    }
+    QString model() const { return m_model->text(); }
+    int channels() const { return m_ch->value(); }
+private: QLineEdit *m_model; QSpinBox *m_ch;
+};
 
 class AddressPage : public QWidget
 {
@@ -18,127 +57,189 @@ class AddressPage : public QWidget
 public:
     explicit AddressPage(QWidget *parent = nullptr) : QWidget(parent)
     {
-        auto *root = new QVBoxLayout(this);
-
-        // === 顶部：域选择 + 新建域 ===
-        auto *topBar = new QHBoxLayout;
-        m_domainCombo = new QComboBox;
-        m_domainCombo->addItem("域 1");
-        topBar->addWidget(new QLabel("选择域:"));
-        topBar->addWidget(m_domainCombo);
-
-        auto *newDomainBtn = new QPushButton("+ 新建域");
-        topBar->addWidget(newDomainBtn);
-        auto *backBtn = new QPushButton("← 返回2D视图");
-        topBar->addWidget(backBtn);
-        topBar->addStretch();
-
-        m_totalLabel = new QLabel("共 512 通道");
-        topBar->addWidget(m_totalLabel);
-        root->addLayout(topBar);
-
-        connect(backBtn, &QPushButton::clicked, this, &AddressPage::goBackRequested);
-
-        // === 网格：512 通道，32 列 × 16 行 ===
-        auto *scroll = new QScrollArea;
-        scroll->setWidgetResizable(true);
-        m_gridWidget = new QWidget;
-        m_gridLayout = new QGridLayout(m_gridWidget);
-        m_gridLayout->setSpacing(1);
-
-        buildGrid();
-
-        scroll->setWidget(m_gridWidget);
-        root->addWidget(scroll);
-
-        // === 连接 ===
-        connect(newDomainBtn, &QPushButton::clicked, this, [this]() {
-            emit newDomainRequested();
+        auto *oroot = new QHBoxLayout(this); oroot->setContentsMargins(0,0,0,0);
+        auto *tb = new QFrame; tb->setFixedWidth(140);
+        tb->setStyleSheet("background:#e8e8e8;border-right:1px solid #ccc");
+        auto *tbl = new QVBoxLayout(tb); tbl->setSpacing(4);
+        auto makeBtn = [&](const char *text, std::function<void()> fn){
+            auto *b = new QPushButton(QString("  %1").arg(text)); b->setFixedHeight(36);
+            b->setStyleSheet("background:#f5f5f5;color:#222;border:1px solid #ccc;border-radius:4px;text-align:left;padding-left:12px");
+            QObject::connect(b, &QPushButton::clicked, this, fn); tbl->addWidget(b);
+        };
+        makeBtn("新建",   [this](){
+            auto *mb = new QMessageBox(QMessageBox::Warning, "新建", "新建会导致未另存的数据丢失，是否继续？",
+                                       QMessageBox::Yes | QMessageBox::No, this);
+            if (mb->exec() == QMessageBox::Yes) {
+                m_doms.clear(); m_cur = 0; rebuildList(); clearDetail();
+            }
         });
+        makeBtn("打开",   [this](){ onOpen(); });
+        makeBtn("保存",   [this](){ onSave(); });
+        makeBtn("另存为", [this](){ onSaveAs(); });
+        tbl->addStretch();
+        auto *bk = new QPushButton("  返回主界面"); bk->setFixedHeight(36);
+        bk->setStyleSheet("background:#ddd;color:#333;border:1px solid #bbb;border-radius:4px");
+        connect(bk,&QPushButton::clicked,this,&AddressPage::backRequested);
+        tbl->addWidget(bk); oroot->addWidget(tb);
 
-        connect(m_domainCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                this, [this](int idx) { emit domainChanged(idx); });
+        auto *main = new QFrame; main->setStyleSheet("background:#fff");
+        auto *hs = new QHBoxLayout(main); hs->setContentsMargins(0,0,0,0);
+        // 左：域列表
+        auto *left = new QFrame; left->setMinimumWidth(300);
+        left->setStyleSheet("background:#fafafa;border-right:1px solid #ddd");
+        auto *ll = new QVBoxLayout(left);
+        auto *hr = new QHBoxLayout;
+        hr->addWidget(new QLabel("域")); hr->addStretch();
+        ll->addLayout(hr);
+        auto *sc = new QScrollArea; sc->setWidgetResizable(true);
+        m_listW = new QWidget; m_listL = new QVBoxLayout(m_listW); m_listL->setSpacing(2); m_listL->setAlignment(Qt::AlignTop);
+        sc->setWidget(m_listW); ll->addWidget(sc, 1);
+        hs->addWidget(left, 1);
+        // 右：详情
+        m_detail = new QFrame; m_detail->setStyleSheet("background:#f5f5f5");
+        m_detailL = new QVBoxLayout(m_detail); m_detailL->setAlignment(Qt::AlignTop);
+        m_detailL->addWidget(new QLabel("点击域查看地址码"));
+        hs->addWidget(m_detail, 2);
+        oroot->addWidget(main, 1);
     }
 
-    void setChannelValue(int ch, uint8_t value)
-    {
-        if (ch < 0 || ch >= 512) return;
-        m_channelEdits[ch]->setText(QString::number(value));
+    void addDomain(const QString &model, int ch) { m_doms << AddrEntry{model, ch}; rebuildList(); }
+    QList<AddrEntry> getDomains() const { return m_doms; }
+    void updateFixtures(const QList<Fixture *> &fixtures) {
+        m_all = fixtures;
+        // 自动创建域：有灯具还没域→新建
+        QSet<QString> models;
+        for (auto *f : fixtures) models << f->name();
+        for (auto &m : models) {
+            bool found = false;
+            for (auto &d : m_doms) if (d.model == m) { found = true; break; }
+            if (!found) {
+                m_doms << AddrEntry{m, fixtures[0]->channelCount()};
+                if (m_doms.size() == 1) m_cur = 0;
+            }
+        }
+        rebuildList();
     }
-
-    uint8_t channelValue(int ch) const
-    {
-        if (ch < 0 || ch >= 512) return 0;
-        return static_cast<uint8_t>(m_channelEdits[ch]->text().toInt());
-    }
-
-    int currentDomain() const { return m_domainCombo->currentIndex(); }
-
-    void addDomain(const QString &name)
-    {
-        m_domainCombo->addItem(name);
-        m_domainCombo->setCurrentIndex(m_domainCombo->count() - 1);
-    }
+    int curDomain() const { return m_cur; }
 
 signals:
+    void backRequested();
     void goBackRequested();
-    void domainChanged(int index);
-    void newDomainRequested();
-    void channelEdited(int channel, uint8_t value);
+    void newDomainRequested(const QString &model, int channels);
+    void deleteDomainRequested(const QString &model);
 
-private:
-    void buildGrid()
-    {
-        // 清空旧格子
-        for (auto *w : m_channelEdits) delete w;
-        m_channelEdits.fill(nullptr, 512);
-
-        // 清除所有 item
-        QLayoutItem *child;
-        while ((child = m_gridLayout->takeAt(0)) != nullptr)
-            delete child;
-
-        const int cols = 32;
-        for (int ch = 0; ch < 512; ch++)
-        {
-            int row = ch / cols;
-            int col = ch % cols;
-
-            auto *frame = new QFrame;
-            frame->setStyleSheet("background:#222;border:1px solid #444");
-            auto *vl = new QVBoxLayout(frame);
-            vl->setContentsMargins(2, 1, 2, 1);
-            vl->setSpacing(0);
-
-            auto *label = new QLabel(QString("%1").arg(ch + 1));
-            label->setStyleSheet("color:#888;font-size:8px;border:none");
-            label->setAlignment(Qt::AlignCenter);
-
-            auto *edit = new QLineEdit("0");
-            edit->setStyleSheet("background:transparent;color:#0f0;font-size:11px;border:none;padding:0");
-            edit->setAlignment(Qt::AlignCenter);
-            edit->setMaxLength(3);
-            edit->setMaximumWidth(36);
-
-            connect(edit, &QLineEdit::textEdited, this, [this, ch](const QString &t) {
-                bool ok;
-                int v = t.toInt(&ok);
-                if (ok && v >= 0 && v <= 255)
-                    emit channelEdited(ch, static_cast<uint8_t>(v));
-            });
-
-            vl->addWidget(label);
-            vl->addWidget(edit);
-            m_gridLayout->addWidget(frame, row, col);
-            m_channelEdits[ch] = edit;
+private slots:
+    void onNew() {
+        m_doms.clear(); m_cur = 0; rebuildList(); clearDetail();
+    }
+    void onOpen() {
+        QString path = QFileDialog::getOpenFileName(this, "打开域文件", "", "JSON (*.json)");
+        if (path.isEmpty()) return;
+        QFile f(path);
+        if (f.open(QIODevice::ReadOnly)) {
+            m_doms.clear();
+            for (auto v : QJsonDocument::fromJson(f.readAll()).array()) {
+                auto o = v.toObject();
+                m_doms << AddrEntry{o["model"].toString(), o["channels"].toInt()};
+            }
+            f.close(); m_cur = m_doms.isEmpty() ? 0 : 0; rebuildList();
+        }
+    }
+    void onSave() {
+        if (m_cur < 0 || m_cur >= m_doms.size()) return;
+        QString path = QFileDialog::getSaveFileName(this, "保存域文件", "domains.json", "JSON (*.json)");
+        if (path.isEmpty()) return;
+        QJsonArray arr;
+        for (auto &d : m_doms)
+            arr << QJsonObject{{"model", d.model}, {"channels", d.channels}};
+        QFile f(path);
+        if (f.open(QIODevice::WriteOnly)) { f.write(QJsonDocument(arr).toJson()); f.close(); }
+    }
+    void onSaveAs() { onSave(); }
+    void onAddDomain() {
+        AddrDomainDialog d(this);
+        if (d.exec() == QDialog::Accepted && !d.model().isEmpty()) {
+            m_doms << AddrEntry{d.model(), d.channels()};
+            if (m_doms.size() == 1) m_cur = 0;
+            rebuildList();
+            emit newDomainRequested(d.model(), d.channels());
         }
     }
 
-    QComboBox                *m_domainCombo;
-    QLabel                   *m_totalLabel;
-    QWidget                  *m_gridWidget;
-    QGridLayout              *m_gridLayout;
-    QList<QLineEdit *>        m_channelEdits;
+private:
+    void rebuildList() {
+        QLayoutItem *c; while ((c = m_listL->takeAt(0))) { if (c->widget()) { c->widget()->setParent(nullptr); delete c->widget(); } delete c; }
+        QMap<QString, int> cnts; for (auto *f : m_all) cnts[f->name()]++;
+
+        for (int i = 0; i < m_doms.size(); i++) {
+            auto &d = m_doms[i]; int qty = cnts.value(d.model, 0);
+            auto *r = new QFrame; r->setStyleSheet("background:#f9f9f9;border:1px solid #eee;border-radius:3px;cursor:pointer"); r->setMinimumHeight(40);
+            r->setProperty("di", i); r->installEventFilter(this);
+            auto *hl = new QHBoxLayout(r);
+            auto *dot = new QLabel; dot->setFixedSize(10,10);
+            dot->setStyleSheet(i == m_cur ? "background:#0f0;border-radius:5px" : "background:transparent;border-radius:5px");
+            hl->addWidget(dot);
+            hl->addWidget(new QLabel(QString("灯型号：%1    通道：%2    数量：%3").arg(d.model).arg(d.channels).arg(qty)));
+            hl->addStretch();
+            if (m_deleteMode) {
+                auto *xBtn = new QPushButton("×"); xBtn->setFixedSize(24,24);
+                xBtn->setStyleSheet("color:red;font-weight:bold;border:none;background:transparent;font-size:16px");
+                int idx = i;
+                connect(xBtn, &QPushButton::clicked, this, [this, idx]() {
+                    QString m = m_doms[idx].model; m_doms.removeAt(idx);
+                    if (m_cur >= m_doms.size()) m_cur = m_doms.size() - 1;
+                    rebuildList();
+                    emit deleteDomainRequested(m);
+                });
+                hl->addWidget(xBtn);
+            }
+            m_listL->addWidget(r);
+        }
+        m_listL->addStretch();
+        if (m_cur >= 0 && m_cur < m_doms.size()) showDetail(m_cur); else clearDetail();
+    }
+
+    void showDetail(int i) {
+        m_cur = i; auto &d = m_doms[i];
+        QLayoutItem *c; while ((c = m_detailL->takeAt(0))) { if (c->widget()) delete c->widget(); delete c; }
+        QList<Fixture *> matched; for (auto *f : m_all) if (f->name() == d.model) matched << f;
+        auto *h = new QLabel(QString("灯型号：%1   通道：%2   数量：%3").arg(d.model).arg(d.channels).arg(matched.size()));
+        h->setStyleSheet("color:#222;font-size:15px;font-weight:bold;padding:8px 12px;background:#e8e8e8");
+        m_detailL->addWidget(h);
+        auto *sc = new QScrollArea; sc->setWidgetResizable(true); auto *w = new QWidget; auto *l = new QVBoxLayout(w); l->setSpacing(2); l->setAlignment(Qt::AlignTop);
+        for (auto *f : matched) {
+            auto *r = new QFrame; r->setStyleSheet("background:#fff;border-bottom:1px solid #eee"); r->setFixedHeight(36);
+            auto *hl = new QHBoxLayout(r); hl->setContentsMargins(12,0,12,0);
+            auto *a = new QLabel(QString("%1").arg(f->address(), 3, 10, QChar('0')));
+            hl->addWidget(a); hl->addSpacing(20); hl->addWidget(new QLabel(f->name())); hl->addStretch();
+            l->addWidget(r);
+        }
+        l->addStretch(); sc->setWidget(w); m_detailL->addWidget(sc, 1);
+    }
+
+    void clearDetail() {
+        QLayoutItem *c; while ((c = m_detailL->takeAt(0))) { if (c->widget()) delete c->widget(); delete c; }
+        m_detailL->addWidget(new QLabel("点击域查看地址码"));
+    }
+
+    bool eventFilter(QObject *o, QEvent *e) override {
+        if (e->type() == QEvent::MouseButtonDblClick && !m_deleteMode && !m_rebuilding) {
+            auto *f = qobject_cast<QFrame *>(o);
+            if (f && f->property("di").isValid()) {
+                int i = f->property("di").toInt();
+                if (i >= 0 && i < m_doms.size()) {
+                    m_cur = i;
+                    m_rebuilding = true;
+                    QTimer::singleShot(0, this, [this]() { rebuildList(); m_rebuilding = false; });
+                }
+            }
+        }
+        return QWidget::eventFilter(o, e);
+    }
+
+    QWidget *m_listW; QVBoxLayout *m_listL; QFrame *m_detail; QVBoxLayout *m_detailL;
+    QList<AddrEntry> m_doms; int m_cur = 0; QList<Fixture *> m_all;
+    bool m_deleteMode = false; bool m_rebuilding = false;
 };
 
-#endif // ADDRESSPAGE_H
+#endif

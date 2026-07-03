@@ -9,7 +9,6 @@
 #include "fixturedialog.h"
 #include "addresspage.h"
 #include "librarypage.h"
-#include "domainpage.h"
 #include "globe3d.h"
 #include "colorwheel.h"
 #include "beamwidget.h"
@@ -108,33 +107,16 @@ MainWindow::MainWindow(QWidget *parent)
     // ===== 右侧 QStackedWidget（先创建，switchDomain 要用）=====
     m_rightStack = new QStackedWidget;
     m_rightStack->addWidget(ui->rightSplitter);
-    m_addressPage = new AddressPage;
-    m_rightStack->addWidget(m_addressPage);
     m_libraryPage = new LibraryPage;
     m_libraryPage->setLibrary(m_library);
-    m_domainPage = new DomainPage;
+    m_addressPage = new AddressPage;
     // 全屏叠加层
     m_masterStack = new QStackedWidget;
     m_masterStack->addWidget(ui->centralwidget);   // 0 = 正常布局
     m_masterStack->addWidget(m_libraryPage);       // 1 = 全屏灯库
-    m_masterStack->addWidget(m_domainPage);        // 2 = 域管理
+    m_masterStack->addWidget(m_addressPage);       // 2 = 域管理
     setCentralWidget(m_masterStack);
     connect(m_libraryPage, &LibraryPage::goBackRequested, this, [this]() { m_masterStack->setCurrentIndex(0); });
-    connect(m_domainPage, &DomainPage::goBackRequested, this, [this]() { m_masterStack->setCurrentIndex(0); });
-    connect(m_domainPage, &DomainPage::domainSwitched, this, [this](int idx) {
-        while (m_universes.size() <= idx)
-            m_universes << new Universe(m_universes.size(), this);
-        switchDomain(idx);
-    });
-    // 新建域 → 批量添加灯具
-    connect(m_domainPage, &DomainPage::newDomainRequested, this, [this](const QString &model, int ch) {
-        m_domainPage->addDomain(model, ch);
-    });
-    connect(m_domainPage, &DomainPage::domainSwitched, this, [this](int idx) {
-        while (m_universes.size() <= idx)
-            m_universes << new Universe(m_universes.size(), this);
-        switchDomain(idx);
-    });
     connect(m_libraryPage, &LibraryPage::libraryUpdated, this, [this](const QList<FixtureDef> &lib) {
         m_library = lib;
         ui->libraryList->clear();
@@ -147,20 +129,19 @@ MainWindow::MainWindow(QWidget *parent)
     delete item;
     ui->rootLayout->insertWidget(idx, m_rightStack);
 
-    // 地址页：域切换
-    connect(m_addressPage, &AddressPage::domainChanged, this, [this](int di) {
-        if (di >= 0 && di < m_universes.size())
-            switchDomain(di);
-    });
+    connect(m_addressPage, &AddressPage::backRequested, this, [this]() { m_masterStack->setCurrentIndex(0); });
     // 地址页：新建域
-    connect(m_addressPage, &AddressPage::newDomainRequested, this, [this]() {
-        auto *u = new Universe(m_universes.size(), this);
-        m_universes << u;
-        m_addressPage->addDomain(QString("域 %1").arg(m_universes.size()));
-        switchDomain(m_universes.size() - 1);
+    connect(m_addressPage, &AddressPage::newDomainRequested, this, [this](const QString &model, int ch) {
+        while (m_universes.size() <= m_addressPage->curDomain())
+            m_universes << new Universe(m_universes.size(), this);
     });
-    // 返回2D视图
-    connect(m_addressPage, &AddressPage::goBackRequested, this, [this]() { m_rightStack->setCurrentIndex(0); });
+    // 地址页：删除域
+    connect(m_addressPage, &AddressPage::deleteDomainRequested, this, [this](const QString &model) {
+        // 删除匹配的所有灯具
+        auto fixtures = currentUniverse()->fixtures();
+        for (int i = fixtures.size() - 1; i >= 0; i--)
+            if (fixtures[i]->name() == model) removeFixture(fixtures[i]);
+    });
 
     // 菜单：灯库 → 灯库详情页（替换空子菜单为直触点）
     {
@@ -319,9 +300,10 @@ void MainWindow::switchDomain(int domainIndex)
     refreshFixtureList();
     showLibraryMode();
 
-    // 刷新地址码页面
-    for (int ch = 0; ch < 512; ch++)
-        m_addressPage->setChannelValue(ch, u->channelValue(ch));
+    // 刷新地址码页面（所有宇宙）
+    QList<Fixture *> allFx;
+    for (auto *uv : m_universes) allFx << uv->fixtures();
+    m_addressPage->updateFixtures(allFx);
 }
 
 // =====================================================================
@@ -398,15 +380,35 @@ void MainWindow::on_removeFixtureBtn_clicked()
 
 void MainWindow::addFixtureToCurrent(const FixtureDef &def, const QPointF &pos)
 {
-    Universe *u = currentUniverse();
+    // 找到/创建对应型号的域
+    int domIdx = -1;
+    auto doms = m_addressPage->getDomains();
+    for (int i = 0; i < doms.size(); i++) {
+        if (doms[i].model == def.name) { domIdx = i; break; }
+    }
+    if (domIdx < 0) {
+        domIdx = doms.size();
+        m_addressPage->addDomain(def.name, def.channels);
+    }
+    while (m_universes.size() <= domIdx)
+        m_universes << new Universe(m_universes.size(), this);
+
+    Universe *u = m_universes[domIdx];
     if (!u) return;
 
-    auto *f = new Fixture(def, this);
-    int cnt = 0;
-    for (auto *fx : u->fixtures())
-        if (fx->definition().name == def.name) cnt++;
-    f->setName(def.name);  // 直接用灯库型号名
+    // 512 限制（仅该域内）
+    int nextAddr = 1;
+    for (auto *fx : u->fixtures()) nextAddr += fx->channelCount();
+    if (nextAddr + def.channels - 1 > 512) {
+        QMessageBox::warning(this, "地址码超限",
+            QString("域 %1 已占用到 %2，此灯(%3通道)将超512")
+                .arg(domIdx + 1).arg(nextAddr - 1).arg(def.channels));
+        return;
+    }
 
+    auto *f = new Fixture(def, this);
+    f->setName(def.name);
+    f->setUniverse(domIdx);
     u->addFixture(f);
 
     auto *fitm = new FixtureItem(f);
@@ -418,7 +420,11 @@ void MainWindow::addFixtureToCurrent(const FixtureDef &def, const QPointF &pos)
     m_globe3D->addFixture(f, pos);
     refreshFixtureList();
     sendDmx();
-    m_domainPage->updateFixtures(currentUniverse()->fixtures());
+    // 收集所有宇宙的灯具更新地址码页面
+    QList<Fixture *> allFixtures;
+    for (auto *uv : m_universes)
+        allFixtures << uv->fixtures();
+    m_addressPage->updateFixtures(allFixtures);
 }
 
 void MainWindow::removeFixture(Fixture *f)
@@ -443,13 +449,17 @@ void MainWindow::removeFixture(Fixture *f)
 void MainWindow::refreshFixtureList()
 {
     ui->fixtureList->clear();
-    Universe *u = currentUniverse();
-    if (!u) return;
-    int addr = 1;
-    for (auto *f : u->fixtures()) {
-        f->setAddress(addr);
-        addr += f->channelCount();
-        ui->fixtureList->addItem(QString("%1  地址%2  %3通道").arg(f->name()).arg(f->address()).arg(f->channelCount()));
+    for (int di = 0; di < m_universes.size(); di++) {
+        auto *u = m_universes[di];
+        if (!u) continue;
+        int addr = 1;
+        for (auto *f : u->fixtures()) {
+            f->setAddress(addr);
+            addr += f->channelCount();
+            ui->fixtureList->addItem(QString("域%1  %2  [%3]  %4通道")
+                .arg(di + 1).arg(f->name())
+                .arg(f->address(), 3, 10, QChar('0')).arg(f->channelCount()));
+        }
     }
 }
 
@@ -664,8 +674,9 @@ void MainWindow::sendDmx()
 
     // 性能：只在地址码页可见时刷新 UI
     if (m_addressPage->isVisible()) {
-        for (int ch = 0; ch < 512; ch++)
-            m_addressPage->setChannelValue(ch, u->channelValue(ch));
+        QList<Fixture *> allFx;
+        for (auto *uv : m_universes) allFx << uv->fixtures();
+        m_addressPage->updateFixtures(allFx);
     }
 }
 
@@ -675,6 +686,9 @@ void MainWindow::sendDmx()
 
 void MainWindow::on_actionAddressPage_triggered()
 {
+    QList<Fixture *> allFx;
+    for (auto *uv : m_universes) allFx << uv->fixtures();
+    m_addressPage->updateFixtures(allFx);
     m_masterStack->setCurrentIndex(2);
 }
 
