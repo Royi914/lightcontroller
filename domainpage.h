@@ -19,40 +19,36 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QMouseEvent>
+#include <QTimer>
 #include <QList>
 #include <QMap>
 #include "Fixture.h"
+
+struct DomainEntry { QString model; int channels; };
 
 class AddDomainDialog : public QDialog
 {
     Q_OBJECT
 public:
-    explicit AddDomainDialog(QWidget *parent = nullptr) : QDialog(parent)
-    {
+    explicit AddDomainDialog(QWidget *parent = nullptr) : QDialog(parent) {
         setWindowTitle("新建域"); setStyleSheet("background:#fff");
         auto *root = new QVBoxLayout(this); auto *form = new QFormLayout;
-        m_modelEdit = new QLineEdit; m_modelEdit->setPlaceholderText("例如：万锐帕灯");
-        m_modelEdit->setStyleSheet("color:#000;border:1px solid #aaa;padding:4px");
-        form->addRow("灯型号：", m_modelEdit);
-        m_chSpin = new QSpinBox; m_chSpin->setRange(1, 64); m_chSpin->setValue(8);
-        m_chSpin->setStyleSheet("color:#000;border:1px solid #aaa;padding:2px");
-        form->addRow("通道数：", m_chSpin);
-        m_qtySpin = new QSpinBox; m_qtySpin->setRange(1, 512); m_qtySpin->setValue(1);
-        m_qtySpin->setStyleSheet("color:#000;border:1px solid #aaa;padding:2px");
-        form->addRow("数量：", m_qtySpin);
+        m_model = new QLineEdit; m_model->setPlaceholderText("例如：万锐帕灯");
+        m_model->setStyleSheet("color:#000;border:1px solid #aaa;padding:4px");
+        form->addRow("灯型号：", m_model);
+        m_ch = new QSpinBox; m_ch->setRange(1,64); m_ch->setValue(8);
+        m_ch->setStyleSheet("color:#000;border:1px solid #aaa;padding:2px");
+        form->addRow("通道数：", m_ch);
         root->addLayout(form);
-        auto *btns = new QDialogButtonBox;
-        btns->addButton("创建", QDialogButtonBox::AcceptRole);
-        btns->addButton(QDialogButtonBox::Cancel);
+        auto *btns = new QDialogButtonBox; btns->addButton("创建", QDialogButtonBox::AcceptRole); btns->addButton(QDialogButtonBox::Cancel);
         connect(btns, &QDialogButtonBox::accepted, this, &QDialog::accept);
         connect(btns, &QDialogButtonBox::rejected, this, &QDialog::reject);
         root->addWidget(btns);
     }
-    QString model() const { return m_modelEdit->text(); }
-    int channels() const { return m_chSpin->value(); }
-    int quantity() const { return m_qtySpin->value(); }
+    QString model() const { return m_model->text(); }
+    int channels() const { return m_ch->value(); }
 private:
-    QLineEdit *m_modelEdit; QSpinBox *m_chSpin, *m_qtySpin;
+    QLineEdit *m_model; QSpinBox *m_ch;
 };
 
 class DomainPage : public QWidget
@@ -61,183 +57,131 @@ class DomainPage : public QWidget
 public:
     explicit DomainPage(QWidget *parent = nullptr) : QWidget(parent)
     {
-        auto *outerRoot = new QHBoxLayout(this); outerRoot->setContentsMargins(0,0,0,0);
-        auto *toolbar = new QFrame;
-        toolbar->setFixedWidth(140);
-        toolbar->setStyleSheet("background:#e8e8e8;border-right:1px solid #ccc");
-        auto *tbLayout = new QVBoxLayout(toolbar); tbLayout->setSpacing(4);
-        auto btn = [&](const QString &t, void (DomainPage::*s)()) {
-            auto *b = new QPushButton("  " + t); b->setFixedHeight(36);
+        auto *oroot = new QHBoxLayout(this); oroot->setContentsMargins(0,0,0,0);
+        auto *tb = new QFrame; tb->setFixedWidth(140);
+        tb->setStyleSheet("background:#e8e8e8;border-right:1px solid #ccc");
+        auto *tbl = new QVBoxLayout(tb); tbl->setSpacing(4);
+        auto btn = [&](const QString &t, void (DomainPage::*s)()){
+            auto *b = new QPushButton("  "+t); b->setFixedHeight(36);
             b->setStyleSheet("background:#f5f5f5;color:#222;border:1px solid #ccc;border-radius:4px;text-align:left;padding-left:12px");
-            connect(b, &QPushButton::clicked, this, s); tbLayout->addWidget(b);
+            connect(b,&QPushButton::clicked,this,s); tbl->addWidget(b);
         };
-        btn("新建", &DomainPage::onNew); btn("打开", &DomainPage::onOpenFile);
-        btn("保存", &DomainPage::onSaveFile); btn("另存为", &DomainPage::onSaveAsFile);
-        tbLayout->addStretch();
-        auto *back = new QPushButton("  返回主界面"); back->setFixedHeight(36);
-        back->setStyleSheet("background:#ddd;color:#333;border:1px solid #bbb;border-radius:4px");
-        connect(back, &QPushButton::clicked, this, &DomainPage::goBackRequested);
-        tbLayout->addWidget(back);
-        outerRoot->addWidget(toolbar);
+        btn("新建",&DomainPage::onNew); btn("打开",&DomainPage::onOpen); btn("保存",&DomainPage::onSave); btn("另存为",&DomainPage::onSaveAs);
+        tbl->addStretch();
+        auto *bk = new QPushButton("  返回主界面"); bk->setFixedHeight(36);
+        bk->setStyleSheet("background:#ddd;color:#333;border:1px solid #bbb;border-radius:4px");
+        connect(bk,&QPushButton::clicked,this,&DomainPage::goBackRequested);
+        tbl->addWidget(bk); oroot->addWidget(tb);
 
-        auto *mainArea = new QFrame; mainArea->setStyleSheet("background:#fff");
-        auto *hSplit = new QHBoxLayout(mainArea); hSplit->setContentsMargins(0,0,0,0);
+        auto *main = new QFrame; main->setStyleSheet("background:#fff");
+        auto *hs = new QHBoxLayout(main); hs->setContentsMargins(0,0,0,0);
 
-        auto *leftPanel = new QFrame; leftPanel->setMinimumWidth(300);
-        leftPanel->setStyleSheet("background:#fafafa;border-right:1px solid #ddd");
-        auto *leftLayout = new QVBoxLayout(leftPanel);
-        auto *headerRow = new QHBoxLayout;
-        auto *title = new QLabel("域");
-        title->setStyleSheet("color:#222;font-size:16px;font-weight:bold;padding:8px;border:none");
-        headerRow->addWidget(title); headerRow->addStretch();
-        auto *addBtn = new QPushButton("+ 新建域"); addBtn->setStyleSheet("background:#e0e0ff;color:#224;border:1px solid #aab;border-radius:4px;padding:4px 10px");
-        connect(addBtn, &QPushButton::clicked, this, &DomainPage::onNewDomain);
-        headerRow->addWidget(addBtn);
-        m_delBtn = new QPushButton("- 删除域"); m_delBtn->setStyleSheet("background:#ffe0e0;color:#422;border:1px solid #baa;border-radius:4px;padding:4px 10px");
-        connect(m_delBtn, &QPushButton::clicked, this, &DomainPage::onToggleDelete);
-        headerRow->addWidget(m_delBtn);
-        leftLayout->addLayout(headerRow);
+        auto *left = new QFrame; left->setMinimumWidth(300);
+        left->setStyleSheet("background:#fafafa;border-right:1px solid #ddd");
+        auto *ll = new QVBoxLayout(left);
+        auto *hr = new QHBoxLayout;
+        hr->addWidget(new QLabel("域")); hr->addStretch();
+        auto *addBtn = new QPushButton("+ 新建域");
+        addBtn->setStyleSheet("background:#e0e0ff;color:#224;border:1px solid #aab;border-radius:4px;padding:4px 10px");
+        connect(addBtn,&QPushButton::clicked,this,&DomainPage::onNewDomain);
+        hr->addWidget(addBtn);
+        auto *delBtn = new QPushButton("- 删除域");
+        delBtn->setStyleSheet("background:#ffe0e0;color:#422;border:1px solid #baa;border-radius:4px;padding:4px 10px");
+        connect(delBtn,&QPushButton::clicked,this,[this,delBtn](){
+            m_deleteMode=!m_deleteMode;
+            delBtn->setText(m_deleteMode?"完成删除":"- 删除域");
+            rebuild();
+        });
+        hr->addWidget(delBtn);
+        ll->addLayout(hr);
+        auto *sc = new QScrollArea; sc->setWidgetResizable(true);
+        m_listW = new QWidget; m_listL = new QVBoxLayout(m_listW); m_listL->setSpacing(2); m_listL->setAlignment(Qt::AlignTop);
+        sc->setWidget(m_listW); ll->addWidget(sc,1);
+        hs->addWidget(left,1);
 
-        auto *listScroll = new QScrollArea; listScroll->setWidgetResizable(true);
-        m_listWidget = new QWidget;
-        m_listLayout = new QVBoxLayout(m_listWidget); m_listLayout->setSpacing(2); m_listLayout->setAlignment(Qt::AlignTop);
-        listScroll->setWidget(m_listWidget);
-        leftLayout->addWidget(listScroll, 1);
-        hSplit->addWidget(leftPanel, 1);
-
-        m_detailArea = new QFrame; m_detailArea->setStyleSheet("background:#f5f5f5");
-        m_detailLayout = new QVBoxLayout(m_detailArea); m_detailLayout->setAlignment(Qt::AlignTop);
-        clearDetail();
-        hSplit->addWidget(m_detailArea, 2);
-        outerRoot->addWidget(mainArea, 1);
+        m_detail = new QFrame; m_detail->setStyleSheet("background:#f5f5f5");
+        m_detailL = new QVBoxLayout(m_detail); m_detailL->setAlignment(Qt::AlignTop);
+        m_detailL->addWidget(new QLabel("点击域查看地址码"));
+        hs->addWidget(m_detail,2);
+        oroot->addWidget(main,1);
     }
 
-    void updateFixtures(const QList<Fixture *> &fixtures)
-    {
-        m_allFixtures = fixtures;
-        rebuildList();
-    }
+    void updateFixtures(const QList<Fixture*> &fixtures) { m_all = fixtures; rebuild(); }
+    void addDomain(const QString &model, int ch) { m_doms << DomainEntry{model,ch}; if(m_doms.size()==1) m_cur=0; rebuild(); }
+    int curDomain() const { return m_cur; }
+    void setCurDomain(int i) { if(i>=0&&i<m_doms.size()){m_cur=i; rebuild();} }
 
 signals:
     void goBackRequested();
-    void newDomainRequested(const QString &model, int channels, int quantity);
-    void deleteDomainRequested(const QString &model);
+    void newDomainRequested(const QString&,int);
+    void domainSwitched(int);
 
 private slots:
-    void onNewDomain() {
-        AddDomainDialog dlg(this);
-        if (dlg.exec() != QDialog::Accepted) return;
-        if (dlg.model().isEmpty()) { QMessageBox::warning(this, "提示", "灯型号不能为空"); return; }
-        emit newDomainRequested(dlg.model(), dlg.channels(), dlg.quantity());
+    void onNewDomain(){
+        AddDomainDialog d(this);
+        if(d.exec()==QDialog::Accepted && !d.model().isEmpty())
+            emit newDomainRequested(d.model(), d.channels());
     }
-
-    void onToggleDelete() {
-        m_deleteMode = !m_deleteMode;
-        if (m_deleteMode) {
-            m_delBtn->setText("完成删除");
-            m_delBtn->setStyleSheet("background:#c44;color:#fff;border-radius:4px;padding:4px 10px");
-        } else {
-            m_delBtn->setText("- 删除域");
-            m_delBtn->setStyleSheet("background:#ffe0e0;color:#422;border:1px solid #baa;border-radius:4px;padding:4px 10px");
-        }
-        rebuildList();
-    }
-
-    void onNew() {}
-    void onOpenFile() {}
-    void onSaveFile() {}
-    void onSaveAsFile() {}
+    void onNew(){} void onOpen(){} void onSave(){} void onSaveAs(){}
 
 private:
-    void rebuildList() {
-        while (m_listLayout->count() > 0) {
-            auto *it = m_listLayout->takeAt(0); if (it->widget()) delete it->widget(); delete it;
-        }
-        QMap<QString, QList<Fixture *>> groups;
-        for (auto *f : m_allFixtures) groups[f->name()] << f;
+    void rebuild(){
+        QLayoutItem *c; while((c=m_listL->takeAt(0))!=nullptr){if(c->widget()){c->widget()->setParent(nullptr);delete c->widget();}delete c;}
+        QMap<QString,int> cnts; for(auto*f:m_all) cnts[f->name()]++;
 
-        if (groups.isEmpty()) {
-            m_listLayout->addWidget(new QLabel("（暂无灯具）"));
-            m_listLayout->addStretch(); clearDetail(); m_currentGroup.clear(); return;
+        for(int i=0;i<m_doms.size();i++){
+            auto&d=m_doms[i]; int qty=cnts.value(d.model,0);
+            auto*r=new QFrame; r->setStyleSheet("background:#f9f9f9;border:1px solid #eee;border-radius:3px;cursor:pointer"); r->setMinimumHeight(40);
+            r->setProperty("di",i); r->installEventFilter(this);
+            auto*hl=new QHBoxLayout(r);
+            auto*dot=new QLabel; dot->setFixedSize(10,10);
+            dot->setStyleSheet(i==m_cur?"background:#0f0;border-radius:5px":"background:transparent;border-radius:5px");
+            hl->addWidget(dot);
+            hl->addWidget(new QLabel(QString("灯型号：%1    通道：%2    数量：%3").arg(d.model).arg(d.channels).arg(qty)));
+            hl->addStretch();
+            m_listL->addWidget(r);
         }
-        for (auto it = groups.begin(); it != groups.end(); ++it) {
-            auto *row = new QFrame;
-            row->setStyleSheet("background:#f9f9f9;border:1px solid #eee;border-radius:3px;cursor:pointer");
-            row->setMinimumHeight(40);
-            auto *hl = new QHBoxLayout(row);
-            int ch = it.value().first()->channelCount();
-            auto *label = new QLabel(QString("灯型号：%1    通道：%2    数量：%3")
-                .arg(it.key()).arg(ch).arg(it.value().size()));
-            label->setStyleSheet("color:#333;font-size:12px;border:none;background:transparent");
-            hl->addWidget(label); hl->addStretch();
-
-            if (m_deleteMode) {
-                auto *xBtn = new QPushButton("×"); xBtn->setFixedSize(24,24);
-                xBtn->setStyleSheet("color:red;font-weight:bold;border:none;background:transparent;font-size:16px");
-                connect(xBtn, &QPushButton::clicked, this, [this, key = it.key()]() {
-                    emit deleteDomainRequested(key);
-                });
-                hl->addWidget(xBtn);
-            }
-            row->setProperty("groupKey", it.key());
-            row->installEventFilter(this);
-            m_listLayout->addWidget(row);
-        }
-        m_listLayout->addStretch();
-        if (!m_currentGroup.isEmpty() && groups.contains(m_currentGroup))
-            showDetail(m_currentGroup, groups[m_currentGroup]);
-        else clearDetail();
+        m_listL->addStretch();
+        if(m_cur>=0&&m_cur<m_doms.size()) showDetail(m_cur); else clrDetail();
     }
 
-    void showDetail(const QString &groupName, const QList<Fixture *> &list)
-    {
-        m_currentGroup = groupName;
-        QLayoutItem *pc;
-        while ((pc = m_detailLayout->takeAt(0)) != nullptr) { if (pc->widget()) delete pc->widget(); delete pc; }
-        int ch = list.first()->channelCount();
-        auto *h = new QLabel(QString("灯型号：%1   通道：%2   数量：%3").arg(groupName).arg(ch).arg(list.size()));
-        h->setStyleSheet("color:#222;font-size:15px;font-weight:bold;padding:8px 12px;border:none;background:#e8e8e8");
-        m_detailLayout->addWidget(h);
-        auto *scroll = new QScrollArea; scroll->setWidgetResizable(true);
-        auto *rw = new QWidget; auto *rl = new QVBoxLayout(rw); rl->setSpacing(2); rl->setAlignment(Qt::AlignTop);
-        for (auto *f : list) {
-            auto *row = new QFrame;
-            row->setStyleSheet("background:#fff;border-bottom:1px solid #eee"); row->setFixedHeight(36);
-            auto *hl = new QHBoxLayout(row); hl->setContentsMargins(12,0,12,0);
-            auto *a = new QLabel(QString("%1").arg(f->address(), 3, 10, QChar('0')));
-            a->setStyleSheet("color:#555;font-weight:bold;font-size:13px;border:none");
-            hl->addWidget(a); hl->addSpacing(20);
-            hl->addWidget(new QLabel(f->name())); hl->addStretch();
-            rl->addWidget(row);
+    void showDetail(int i){
+        m_cur=i; auto&d=m_doms[i];
+        QLayoutItem*c; while((c=m_detailL->takeAt(0))!=nullptr){if(c->widget())delete c->widget();delete c;}
+        QList<Fixture*> matched; for(auto*f:m_all)if(f->name()==d.model)matched<<f;
+        auto*h=new QLabel(QString("灯型号：%1   通道：%2   数量：%3").arg(d.model).arg(d.channels).arg(matched.size()));
+        h->setStyleSheet("color:#222;font-size:15px;font-weight:bold;padding:8px 12px;background:#e8e8e8");
+        m_detailL->addWidget(h);
+        auto*sc=new QScrollArea; sc->setWidgetResizable(true); auto*w=new QWidget; auto*l=new QVBoxLayout(w); l->setSpacing(2); l->setAlignment(Qt::AlignTop);
+        for(auto*f:matched){
+            auto*r=new QFrame; r->setStyleSheet("background:#fff;border-bottom:1px solid #eee"); r->setFixedHeight(36);
+            auto*hl=new QHBoxLayout(r); hl->setContentsMargins(12,0,12,0);
+            auto*a=new QLabel(QString("%1").arg(f->address(),3,10,QChar('0')));
+            hl->addWidget(a); hl->addSpacing(20); hl->addWidget(new QLabel(f->name())); hl->addStretch();
+            l->addWidget(r);
         }
-        rl->addStretch(); scroll->setWidget(rw); m_detailLayout->addWidget(scroll, 1);
+        l->addStretch(); sc->setWidget(w); m_detailL->addWidget(sc,1);
     }
 
-    void clearDetail() {
-        QLayoutItem *pc;
-        while ((pc = m_detailLayout->takeAt(0)) != nullptr) { if (pc->widget()) delete pc->widget(); delete pc; }
-        auto *t = new QLabel("点击左侧域查看地址码详情");
-        t->setStyleSheet("color:#888;font-size:14px;padding:20px;border:none;background:transparent");
-        t->setAlignment(Qt::AlignCenter); m_detailLayout->addWidget(t);
+    void clrDetail(){
+        QLayoutItem*c; while((c=m_detailL->takeAt(0))!=nullptr){if(c->widget())delete c->widget();delete c;}
+        m_detailL->addWidget(new QLabel("点击域查看地址码"));
     }
 
-    bool eventFilter(QObject *obj, QEvent *event) override {
-        if (event->type() == QEvent::MouseButtonPress && !m_deleteMode) {
-            auto *f = qobject_cast<QFrame *>(obj);
-            if (f && f->property("groupKey").isValid()) {
-                QString key = f->property("groupKey").toString();
-                QList<Fixture *> list;
-                for (auto *fx : m_allFixtures) if (fx->name() == key) list << fx;
-                showDetail(key, list);
+    bool eventFilter(QObject*o,QEvent*e)override{
+        if(e->type()==QEvent::MouseButtonPress&&!m_deleteMode){
+            auto*f=qobject_cast<QFrame*>(o);
+            if(f&&f->property("di").isValid()){
+                int i=f->property("di").toInt();
+                if(i>=0&&i<m_doms.size()){m_cur=i;rebuild(); QTimer::singleShot(0,this,[this,i](){emit domainSwitched(i);});}
             }
         }
-        return QWidget::eventFilter(obj, event);
+        return QWidget::eventFilter(o,e);
     }
 
-    QWidget *m_listWidget; QVBoxLayout *m_listLayout;
-    QFrame *m_detailArea; QVBoxLayout *m_detailLayout;
-    QString m_currentGroup; QList<Fixture *> m_allFixtures;
-    QPushButton *m_delBtn; bool m_deleteMode = false;
+    QWidget*m_listW; QVBoxLayout*m_listL; QFrame*m_detail; QVBoxLayout*m_detailL;
+    QList<DomainEntry> m_doms; int m_cur=0;
+    QList<Fixture*> m_all; bool m_deleteMode=false;
 };
 
 #endif

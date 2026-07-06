@@ -2,316 +2,800 @@
 #define TIMELINE_H
 
 #include <QWidget>
+#include <QGraphicsWidget>
+#include <QGraphicsScene>
+#include <QGraphicsView>
+#include <QGraphicsLinearLayout>
+#include <QGraphicsSceneMouseEvent>
+#include <QScrollBar>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QScrollArea>
 #include <QLabel>
 #include <QPushButton>
-#include <QFrame>
-#include <QDragEnterEvent>
-#include <QDropEvent>
-#include <QMimeData>
-#include <QRegularExpression>
 #include <QPainter>
-#include <QColor>
-#include <QCoreApplication>
-#include <QMouseEvent>
+#include <QStyleOptionGraphicsItem>
+#include <QWheelEvent>
+#include <QtMath>
+#include <limits>
 #include <QList>
-#include <QDrag>
 
-// ===== 可拖放+缩放的时间块 =====
-class TimelineBlock : public QFrame
+// ============================================================
+//  Constants
+// ============================================================
+static constexpr qreal PX_PER_SEC       = 60.0;
+static constexpr qreal BLOCK_MIN_W      = 30.0;   // 0.5 s
+static constexpr qreal BLOCK_H          = 28.0;
+static constexpr qreal TRACK_H          = 40.0;
+static constexpr qreal RULER_H          = 30.0;
+static constexpr qreal RESIZE_MARGIN    = 8.0;
+static constexpr qreal TRACK_LABEL_W    = 60.0;   // 轨道标签 + 刻度尺左边距
+static constexpr qreal TRACK_SWITCH_DY  = 15.0;   // 上下拖动阈值
+
+// ============================================================
+//  1. GraphicsViewScalable  — 可水平缩放的 QGraphicsView
+//     参考 WidgetComposition graphicsviewscalable.h
+// ============================================================
+class GraphicsViewScalable : public QGraphicsView
 {
     Q_OBJECT
 public:
-    explicit TimelineBlock(const QString &fixtureName, double startSec, double durationSec,
-                           QWidget *parent = nullptr)
-        : QFrame(parent), m_name(fixtureName), m_start(startSec), m_duration(durationSec)
+    explicit GraphicsViewScalable(QWidget *parent = nullptr)
+        : QGraphicsView(parent)
     {
-        setFixedHeight(32);
-        setAcceptDrops(true);
-        int hue = qHash(fixtureName) % 360;
-        m_color = QColor::fromHsv(hue, 140, 210);
-        updateStyle();
-        auto *hl = new QHBoxLayout(this);
-        hl->setContentsMargins(8,0,8,0);
-        m_label = new QLabel(fixtureName);
-        m_label->setStyleSheet("color:#222;font-size:10px;border:none;background:transparent");
-        hl->addWidget(m_label); hl->addStretch();
-
-        // 左右拖拽手柄
-        m_leftHandle = new QFrame(this); m_leftHandle->setFixedWidth(6);
-        m_leftHandle->setCursor(Qt::SizeHorCursor);
-        m_leftHandle->setStyleSheet("background:transparent");
-        m_leftHandle->installEventFilter(this);
-        m_rightHandle = new QFrame(this); m_rightHandle->setFixedWidth(6);
-        m_rightHandle->setCursor(Qt::SizeHorCursor);
-        m_rightHandle->setStyleSheet("background:transparent");
-        m_rightHandle->installEventFilter(this);
+        setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+        setResizeAnchor(QGraphicsView::AnchorUnderMouse);
+        setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+        setFrameShape(QFrame::NoFrame);
     }
 
-    void updateGeometry()
+    void zoomIn()  { scaleView(1.0 / 1.2); }
+    void zoomOut() { scaleView(1.2); }
+
+    bool scaleView(qreal factor)
     {
-        int x = static_cast<int>(m_start * 60); // 60px/s
-        int w = qMax(static_cast<int>(m_duration * 60), 30);
-        setGeometry(x, 2, w, 32);
-        m_leftHandle->setGeometry(0, 0, 6, 32);
-        m_rightHandle->setGeometry(w - 6, 0, 6, 32);
-    }
+        QTransform t = transform().scale(factor, 1.0);
+        qreal m11 = t.mapRect(QRectF(0, 0, 1, 1)).width();
+        if (m11 < 0.007 || m11 > 50)
+            return false;
 
-    double startSec()  const { return m_start; }
-    double durationSec() const { return m_duration; }
-    QString fixtureName() const { return m_name; }
-
-    void setStart(double s) { m_start = s; updateStyle(); }
-    void setDuration(double d) { m_duration = qMax(d, 0.5); updateStyle(); }
-
-protected:
-    bool eventFilter(QObject *obj, QEvent *e) override
-    {
-        if (e->type() == QEvent::MouseButtonPress) {
-            auto *me = static_cast<QMouseEvent *>(e);
-            if (me->button() == Qt::LeftButton) {
-                m_dragging = true; m_dragStart = me->globalPosition().toPoint();
-                m_isResize = (obj == m_leftHandle || obj == m_rightHandle);
-                m_resizeLeft = (obj == m_leftHandle);
-                m_origStart = m_start; m_origDur = m_duration;
-                return true;
-            }
-        }
-        return QFrame::eventFilter(obj, e);
-    }
-
-    void mouseMoveEvent(QMouseEvent *e) override
-    {
-        if (!m_dragging) return;
-        int dx = e->globalPosition().toPoint().x() - m_dragStart.x();
-        if (m_isResize) {
-            double sec = dx / 60.0;
-            if (m_resizeLeft) {
-                double newStart = m_origStart + sec;
-                double newDur = m_origDur - sec;
-                if (newDur >= 0.5 && newStart >= 0) {
-                    m_start = newStart; m_duration = newDur;
-                }
-            } else {
-                m_duration = qMax(m_origDur + sec, 0.5);
-            }
+        QRectF vr = viewport()->rect();
+        if (sceneRect().width() * t.m11() - vr.width() < 0) {
+            // Shrink to fit
+            qreal s = vr.width() / sceneRect().width();
+            QTransform m(s, transform().m12(), transform().m21(), transform().m22(),
+                         transform().dx(), transform().dy());
+            setTransform(m, false);
         } else {
-            m_start = m_origStart + dx / 60.0;
-            if (m_start < 0) m_start = 0;
+            setTransform(t);
         }
-        updateStyle();
-        updateGeometry();
-        QFrame::mouseMoveEvent(e);
+        return true;
     }
 
-    void mouseReleaseEvent(QMouseEvent *) override
-    {
-        if (m_dragging && !m_isResize) {
-            m_dragging = false;
-            // 检查是否拖到了另一个轨道：启动 Drag 让 TimelineTrack::dropEvent 处理
-            auto *drag = new QDrag(this);
-            auto *mime = new QMimeData;
-            mime->setText(m_name);
-            mime->setData("x-timeline-move", QByteArray::number(m_start) + "," + QByteArray::number(m_duration));
-            drag->setMimeData(mime);
-            setVisible(false); // 隐藏自己，等 drop 决定
-            Qt::DropAction act = drag->exec(Qt::MoveAction);
-            if (act != Qt::MoveAction) {
-                setVisible(true); // drop 没成功，恢复
-            } else {
-                deleteLater(); // 已经移到新轨道，删除旧块
-            }
-        }
-        m_dragging = false;
-    }
-
-    void updateStyle()
-    {
-        setStyleSheet(QString(
-            "TimelineBlock{background:%1;border-radius:4px;border:1px solid %2}"
-            "TimelineBlock:hover{background:%3}")
-            .arg(m_color.lighter(145).name())
-            .arg(m_color.name())
-            .arg(m_color.lighter(160).name()));
-        if (m_label) m_label->setText(QString("%1  %2s").arg(m_name).arg(m_duration, 0, 'f', 1));
-    }
-
-    QString m_name;
-    double m_start, m_duration;
-    QColor m_color;
-    QLabel *m_label;
-    QFrame *m_leftHandle, *m_rightHandle;
-    bool m_dragging = false, m_isResize = false, m_resizeLeft = false;
-    QPoint m_dragStart;
-    double m_origStart, m_origDur;
+    qreal currentScale() const { return transform().m11(); }
 };
 
-// ===== 轨道 =====
-class TimelineTrack : public QFrame
+// ============================================================
+//  Forward declarations
+// ============================================================
+class BlockWidget;
+
+// ============================================================
+//  2. RulerWidget  — 时间刻度尺
+//     参考 WidgetComposition TimelinePainter::paint()
+// ============================================================
+class RulerWidget : public QGraphicsWidget
 {
-    Q_OBJECT
 public:
-    explicit TimelineTrack(const QString &name, QWidget *parent = nullptr) : QFrame(parent)
+    explicit RulerWidget(QGraphicsItem *parent = nullptr)
+        : QGraphicsWidget(parent)
     {
-        setFixedHeight(44);
-        setAcceptDrops(true);
-        setStyleSheet("background:#fff;border-bottom:1px solid #ddd");
-        auto *hl = new QHBoxLayout(this);
-        hl->setContentsMargins(4,2,4,2);
-        auto *label = new QLabel(name);
-        label->setFixedWidth(100);
-        label->setStyleSheet("color:#555;font-size:11px;border:none;background:transparent");
-        hl->addWidget(label);
-        // 块容器 — 绝对定位
-        m_blockArea = new QWidget;
-        m_blockArea->setStyleSheet("background:transparent");
-        hl->addWidget(m_blockArea, 1);
+        setFlags(QGraphicsItem::ItemUsesExtendedStyleOption);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     }
 
-    void addBlock(const QString &fixtureName, double startSec = 0, double durationSec = 5)
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWidget *) override
     {
-        auto *block = new TimelineBlock(fixtureName, startSec, durationSec, m_blockArea);
-        block->updateGeometry();
-        block->show();
-        m_blocks << block;
-    }
+        const qreal lod = option->levelOfDetailFromTransform(painter->worldTransform());
+        const qreal pxPerSec = PX_PER_SEC * lod * lod;
+        const QRectF exposed = option->exposedRect;
+        const qreal h = boundingRect().height();
 
-    QList<TimelineBlock *> blocks() const { return m_blocks; }
-    QWidget *blockArea() const { return m_blockArea; }
+        // Background: dark area for track labels, then timeline bg
+        painter->fillRect(QRectF(0, 0, TRACK_LABEL_W, h), QColor(0x42, 0x42, 0x42));
+        painter->fillRect(QRectF(TRACK_LABEL_W, 0, exposed.width(), h), QColor(33, 33, 33));
 
-protected:
-    void dragEnterEvent(QDragEnterEvent *e) override
-    {
-        if (e->mimeData()->hasText()) e->acceptProposedAction();
-    }
-    void dropEvent(QDropEvent *e) override
-    {
-        if (!e->mimeData()->hasText()) return;
-        QString name = e->mimeData()->text();
-        double startSec = e->position().toPoint().x() / 60.0;
-        double dur = 5;
-        // 如果是轨道间移动，保持原时长
-        if (e->mimeData()->hasFormat("x-timeline-move")) {
-            auto parts = QString::fromUtf8(e->mimeData()->data("x-timeline-move")).split(",");
-            if (parts.size() >= 2) dur = parts[1].toDouble();
+        // Divider line
+        painter->setPen(QPen(QColor(0x50, 0x50, 0x50), 0));
+        painter->drawLine(QPointF(TRACK_LABEL_W, 0), QPointF(TRACK_LABEL_W, h));
+
+        QPen pen;
+        pen.setCosmetic(true);
+        pen.setColor(QColor(120, 120, 125));
+        pen.setWidth(0);
+        painter->setPen(pen);
+
+        QFont font("Arial");
+        font.setPixelSize(10);
+        painter->setFont(font);
+
+        const qreal tickShort = h * 0.55;
+        const qreal tickFull  = h;
+
+        if (pxPerSec >= 4) {
+            drawTicks(painter, exposed, pxPerSec, 1,   "s", 5,  tickShort, tickFull, h);
+        } else if (pxPerSec * 10 >= 4) {
+            drawTicks(painter, exposed, pxPerSec * 10, 10, "s", 6, tickShort, tickFull, h);
+        } else if (pxPerSec * 60 >= 4) {
+            drawTicks(painter, exposed, pxPerSec * 60, 60, "s", 0, tickShort, tickFull, h);
+        } else if (pxPerSec * 300 >= 4) {
+            drawTicks(painter, exposed, pxPerSec * 300, 300, "s", 0, tickShort, tickFull, h);
         }
-        addBlock(name, startSec, dur);
-        e->acceptProposedAction();
+    }
+
+    QSizeF sizeHint(Qt::SizeHint which, const QSizeF &) const override
+    {
+        if (which == Qt::PreferredSize || which == Qt::MinimumSize)
+            return QSizeF(0, RULER_H);
+        return QSizeF(std::numeric_limits<qint32>::max(), RULER_H);
     }
 
 private:
-    QWidget *m_blockArea;
-    QList<TimelineBlock *> m_blocks;
+    void drawTicks(QPainter *p, const QRectF &exposed, qreal pxStep,
+                   int stepVal, const QString &suffix, int majorEvery,
+                   qreal y1, qreal y2, qreal rulerH) const
+    {
+        const qreal L = exposed.left(), R = exposed.right();
+        const qreal textW = 60, textH = 12, textY = 2;
+        const qreal origin = TRACK_LABEL_W;  // 0s 偏移到标签右侧
+
+        qint32 start = qMax(qint32((L - origin) / pxStep) - 1, 0);
+        for (qint32 i = start; (origin + i * pxStep) <= R + pxStep; i++) {
+            qreal x = origin + i * pxStep;
+            bool isMajor = (majorEvery > 0) && (i % majorEvery == 0);
+
+            p->drawLine(QPointF(x, isMajor ? rulerH * 0.25 : y1), QPointF(x, y2));
+
+            if (isMajor && pxStep > 40) {
+                QTransform t = p->transform();
+                p->setTransform(QTransform(t).scale(1.0 / t.m11(), 1.0));
+                QString label = QString::number(i * stepVal) + suffix;
+                p->setPen(QColor(200, 200, 200));
+                p->drawText(QRectF(x * t.m11() - textW / 2, textY, textW, textH),
+                            Qt::AlignCenter, label);
+                p->setPen(QColor(120, 120, 125));
+                p->setTransform(t);
+            }
+        }
+    }
 };
 
-// ===== 时间线 =====
+// ============================================================
+//  3. TrackWidget  — 单条轨道（声明；实现在 BlockWidget 之后）
+// ============================================================
+class TrackWidget : public QGraphicsWidget
+{
+public:
+    explicit TrackWidget(const QString &name, QGraphicsItem *parent = nullptr);
+    void addBlock(const QString &blockName);
+    void addExistingBlock(BlockWidget *b);
+    void removeBlock(BlockWidget *b);
+    void deleteBlock(BlockWidget *b);
+    QList<BlockWidget *> blocks() const { return m_blocks; }
+    void validateBlock(BlockWidget *self);
+
+    void paint(QPainter *p, const QStyleOptionGraphicsItem *, QWidget *) override;
+    QSizeF sizeHint(Qt::SizeHint which, const QSizeF &) const override;
+
+private:
+    static bool overlaps(BlockWidget *a, BlockWidget *b);
+
+    QString             m_name;
+    QList<BlockWidget *> m_blocks;
+};
+
+// ============================================================
+//  4. BlockWidget  — 可拖拽 + 可 resize + 可切换轨道的时间块
+// ============================================================
+class BlockWidget : public QGraphicsWidget
+{
+public:
+    BlockWidget(const QString &name, TrackWidget *track, QGraphicsItem *parent = nullptr)
+        : QGraphicsWidget(parent), m_track(track), m_name(name)
+    {
+        setAcceptHoverEvents(true);
+        setCursor(Qt::OpenHandCursor);
+        setFlag(QGraphicsItem::ItemIsSelectable);
+        applyGeo();
+    }
+
+    QString    name()   const { return m_name; }
+    double     posSec() const { return m_posSec; }
+    double     durSec() const { return m_durSec; }
+    TrackWidget *track() const { return m_track; }
+
+    void setTrack(TrackWidget *t) { m_track = t; }
+    void setPosSec(double s) { m_posSec = qMax(s, 0.0); applyGeo(); }
+    void setDurSec(double d) { m_durSec = qMax(d, 0.5); applyGeo(); }
+
+    QSizeF sizeHint(Qt::SizeHint which, const QSizeF &) const override
+    {
+        if (which == Qt::PreferredSize)
+            return QSizeF(qMax(m_durSec * PX_PER_SEC, BLOCK_MIN_W), BLOCK_H);
+        return QGraphicsWidget::sizeHint(which, QSizeF());
+    }
+
+    void paint(QPainter *p, const QStyleOptionGraphicsItem *, QWidget *) override
+    {
+        QRectF r = boundingRect().adjusted(1, 1, -1, -1);
+        p->setRenderHint(QPainter::Antialiasing);
+        bool ghost = m_trackSwitching && !m_overTarget;
+
+        // Fill
+        p->setPen(QPen(QColor(0xc0, 0x90, 0x20), 0));
+        p->setBrush(ghost ? QColor(0xf0, 0xc0, 0x40, 120)
+                          : QColor(0xf0, 0xc0, 0x40));
+        p->drawRoundedRect(r, 4, 4);
+
+        // Selection highlight
+        if (isSelected()) {
+            p->setBrush(Qt::NoBrush);
+            p->setPen(QPen(QColor(0x00, 0xaa, 0xff), 2.0));
+            p->drawRoundedRect(r, 4, 4);
+        }
+
+        p->setPen(ghost ? QColor(0x22, 0x22, 0x22, 120) : QColor(0x22, 0x22, 0x22));
+        QFont f("Arial"); f.setPixelSize(10); p->setFont(f);
+        p->drawText(r.adjusted(6, 0, -6, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                    QString("%1  %2s").arg(m_name).arg(m_durSec, 0, 'f', 1));
+    }
+
+protected:
+    void hoverMoveEvent(QGraphicsSceneHoverEvent *e) override
+    {
+        setCursor((size().width() - e->pos().x()) < RESIZE_MARGIN
+                      ? Qt::SizeHorCursor : Qt::OpenHandCursor);
+    }
+    void hoverLeaveEvent(QGraphicsSceneHoverEvent *) override
+    {
+        setCursor(Qt::OpenHandCursor);
+    }
+
+    void mousePressEvent(QGraphicsSceneMouseEvent *e) override
+    {
+        if (e->button() != Qt::LeftButton) return;
+        m_dragStart      = e->scenePos();
+        m_dragStartScene = e->scenePos();
+        m_origPos        = m_posSec;
+        m_origDur        = m_durSec;
+        m_resizing       = (size().width() - e->pos().x()) < RESIZE_MARGIN;
+        m_dragging       = true;
+        m_hasMoved       = false;
+        m_trackSwitching = false;
+        m_overTarget     = false;
+        m_origTrack      = m_track;
+        m_targetTrack    = nullptr;
+        e->accept();
+    }
+
+    void mouseMoveEvent(QGraphicsSceneMouseEvent *e) override
+    {
+        if (!m_dragging) return;
+
+        qreal totalDx = e->scenePos().x() - m_dragStartScene.x();
+        qreal totalDy = e->scenePos().y() - m_dragStartScene.y();
+        if (qAbs(totalDx) > 3.0 || qAbs(totalDy) > 3.0)
+            m_hasMoved = true;
+
+        // Track switching
+        if (!m_resizing && (m_trackSwitching || qAbs(totalDy) > TRACK_SWITCH_DY)) {
+            if (!m_trackSwitching) {
+                m_trackSwitching = true;
+                // Record grab point in block-local coords before reparenting
+                m_grabPoint = mapFromScene(e->scenePos());
+                // Reparent to CompositionWidget so we render above ALL tracks
+                QGraphicsItem *comp = m_origTrack->parentItem();
+                if (comp) setParentItem(comp);
+            }
+            // Position so that m_grabPoint stays under the cursor
+            QPointF localTarget = parentItem()->mapFromScene(e->scenePos()) - m_grabPoint;
+            setPos(localTarget);
+
+            TrackWidget *target = findTrackAtSceneY(e->scenePos().y());
+            m_targetTrack = (target && target != m_origTrack) ? target : nullptr;
+            m_overTarget  = (m_targetTrack != nullptr);
+            update();
+            return;
+        }
+
+        // Normal horizontal drag (within same track)
+        qreal dx = (e->scenePos().x() - m_dragStart.x()) / PX_PER_SEC;
+        if (m_resizing) {
+            setDurSec(qMax(m_origDur + dx, 0.5));
+            m_track->validateBlock(this);
+        } else {
+            setPosSec(qMax(m_origPos + dx, 0.0));
+            m_track->validateBlock(this);
+        }
+    }
+
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent *) override
+    {
+        m_dragging = false;
+        setCursor(Qt::OpenHandCursor);
+
+        if (m_trackSwitching) {
+            if (m_targetTrack) {
+                // Move to target track
+                m_origTrack->removeBlock(this);
+                setParentItem(m_targetTrack);  // scene pos preserved
+                m_track = m_targetTrack;
+                qreal newPosSec = qMax((scenePos().x() - TRACK_LABEL_W) / PX_PER_SEC, 0.0);
+                m_posSec = newPosSec;
+                m_targetTrack->addExistingBlock(this);
+                m_targetTrack->validateBlock(this);
+            } else {
+                // Return to original track
+                setParentItem(m_origTrack);  // scene pos preserved
+                setPosSec(m_origPos);
+            }
+            m_trackSwitching = false;
+            m_targetTrack = nullptr;
+            m_overTarget  = false;
+            applyGeo();
+            update();
+        } else if (!m_hasMoved) {
+            if (scene()) scene()->clearSelection();
+            setSelected(true);
+        }
+    }
+
+private:
+    void applyGeo()
+    {
+        setPos(TRACK_LABEL_W + m_posSec * PX_PER_SEC,
+               (TRACK_H - BLOCK_H) / 2);
+        resize(qMax(m_durSec * PX_PER_SEC, BLOCK_MIN_W), BLOCK_H);
+        updateGeometry();
+    }
+
+    // Find track widget at given scene y coordinate
+    TrackWidget *findTrackAtSceneY(qreal sceneY) const
+    {
+        if (!m_origTrack) return nullptr;
+        // All tracks share the same parent (CompositionWidget)
+        QGraphicsItem *grandparent = m_origTrack->parentItem();
+        if (!grandparent) return nullptr;
+
+        for (auto *child : grandparent->childItems()) {
+            auto *tw = dynamic_cast<TrackWidget *>(child);
+            if (tw) {
+                QPointF local = tw->mapFromScene(QPointF(0, sceneY));
+                if (local.y() >= 0 && local.y() <= TRACK_H)
+                    return tw;
+            }
+        }
+        return nullptr;
+    }
+
+    TrackWidget *m_track;
+    TrackWidget *m_origTrack   = nullptr;
+    TrackWidget *m_targetTrack = nullptr;
+    QString      m_name;
+    double       m_posSec      = 0;
+    double       m_durSec      = 5;
+    QPointF      m_dragStart;
+    QPointF      m_dragStartScene;
+    QPointF      m_grabPoint;         // mouse pos in block-local coords during switch
+    double       m_origPos     = 0;
+    double       m_origDur     = 5;
+    bool         m_dragging    = false;
+    bool         m_resizing    = false;
+    bool         m_hasMoved    = false;
+    bool         m_trackSwitching = false;
+    bool         m_overTarget  = false;
+};
+
+// ============================================================
+//  TrackWidget out-of-line implementations (needs BlockWidget complete)
+// ============================================================
+
+inline TrackWidget::TrackWidget(const QString &name, QGraphicsItem *parent)
+    : QGraphicsWidget(parent), m_name(name)
+{
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    // Blocks are direct children, positioned manually (no layout)
+}
+
+inline void TrackWidget::addBlock(const QString &blockName)
+{
+    auto *b = new BlockWidget(blockName, this, this);
+    if (!m_blocks.isEmpty()) {
+        BlockWidget *last = m_blocks.last();
+        b->setPosSec(last->posSec() + last->durSec());
+    }
+    m_blocks << b;
+}
+
+inline void TrackWidget::addExistingBlock(BlockWidget *b)
+{
+    m_blocks << b;
+    b->setTrack(this);
+}
+
+inline void TrackWidget::removeBlock(BlockWidget *b)
+{
+    m_blocks.removeOne(b);
+}
+
+inline void TrackWidget::deleteBlock(BlockWidget *b)
+{
+    m_blocks.removeOne(b);
+    if (b->scene()) b->scene()->removeItem(b);
+    b->deleteLater();
+}
+
+inline void TrackWidget::validateBlock(BlockWidget *self)
+{
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto *other : m_blocks) {
+            if (other == self) continue;
+            if (overlaps(self, other)) {
+                self->setPosSec(other->posSec() + other->durSec());
+                changed = true;
+            }
+        }
+    }
+    if (self->durSec() < 0.5) self->setDurSec(0.5);
+}
+
+inline void TrackWidget::paint(QPainter *p, const QStyleOptionGraphicsItem *, QWidget *)
+{
+    QRectF r = boundingRect();
+    p->fillRect(r, QColor(0x38, 0x38, 0x38));
+
+    // Top divider — clearly separates tracks
+    p->fillRect(QRectF(0, 0, r.width(), 3), QColor(0x99, 0x99, 0x99));
+
+    // Track label (left of the 0s origin)
+    QRectF labelRect(0, 0, TRACK_LABEL_W - 2, r.height());
+    p->fillRect(labelRect, QColor(0x42, 0x42, 0x42));
+    p->setPen(QColor(0xbb, 0xbb, 0xbb));
+    QFont f("Arial"); f.setPixelSize(10); p->setFont(f);
+    p->drawText(labelRect.adjusted(4, 0, 0, 0), Qt::AlignVCenter | Qt::AlignLeft, m_name);
+
+    // Vertical divider line between label and timeline area
+    p->setPen(QPen(QColor(0x60, 0x60, 0x60), 0));
+    p->drawLine(QPointF(TRACK_LABEL_W, 0), QPointF(TRACK_LABEL_W, r.height()));
+}
+
+inline QSizeF TrackWidget::sizeHint(Qt::SizeHint which, const QSizeF &) const
+{
+    if (which == Qt::PreferredSize || which == Qt::MinimumSize)
+        return QSizeF(0, TRACK_H);
+    return QSizeF(std::numeric_limits<qint32>::max(), TRACK_H);
+}
+
+inline bool TrackWidget::overlaps(BlockWidget *a, BlockWidget *b)
+{
+    return a->posSec() < b->posSec() + b->durSec() &&
+           b->posSec() < a->posSec() + a->durSec();
+}
+
+// ============================================================
+//  5. CompositionWidget  — 轨道容器 (vertical linear layout)
+// ============================================================
+class CompositionWidget : public QGraphicsWidget
+{
+public:
+    explicit CompositionWidget(QGraphicsItem *parent = nullptr)
+        : QGraphicsWidget(parent)
+    {
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        m_layout = new QGraphicsLinearLayout(Qt::Vertical);
+        m_layout->setContentsMargins(0, 0, 0, 0);
+        m_layout->setSpacing(2);
+        setLayout(m_layout);
+    }
+
+    void paint(QPainter *, const QStyleOptionGraphicsItem *, QWidget *) override
+    {
+        // Dividers are painted by TrackWidget (top border of each track)
+    }
+
+    void addTrack(TrackWidget *t, int index = -1)
+    {
+        if (index < 0 || index >= m_layout->count())
+            m_layout->insertItem(m_layout->count(), t);
+        else
+            m_layout->insertItem(index, t);
+        m_tracks << t;
+    }
+
+    void removeTrack(int index)
+    {
+        if (index < 0 || index >= m_tracks.size()) return;
+        TrackWidget *t = m_tracks.takeAt(index);
+        m_layout->removeAt(index);
+        // Remove all blocks on this track
+        for (auto *b : t->blocks()) {
+            if (b->scene()) b->scene()->removeItem(b);
+            b->deleteLater();
+        }
+        if (t->scene()) t->scene()->removeItem(t);
+        t->deleteLater();
+    }
+
+    TrackWidget *track(int i) const
+    {
+        return (i >= 0 && i < m_tracks.size()) ? m_tracks[i] : nullptr;
+    }
+
+    // Find which track contains a given scene Y coordinate
+    TrackWidget *trackAtSceneY(qreal sceneY) const
+    {
+        for (auto *tw : m_tracks) {
+            QPointF local = tw->mapFromScene(QPointF(0, sceneY));
+            if (local.y() >= 0 && local.y() <= TRACK_H)
+                return tw;
+        }
+        return nullptr;
+    }
+
+    int              trackCount() const { return m_tracks.size(); }
+    QList<TrackWidget *> tracks() const { return m_tracks; }
+
+private:
+    QGraphicsLinearLayout *m_layout = nullptr;
+    QList<TrackWidget *>   m_tracks;
+};
+
+// ============================================================
+//  6. Timeline  — 顶层容器（保持对外 API 兼容）
+// ============================================================
 class Timeline : public QWidget
 {
     Q_OBJECT
 public:
-    explicit Timeline(QWidget *parent = nullptr) : QWidget(parent)
-    {
-        auto *root = new QVBoxLayout(this);
-        root->setContentsMargins(0,0,0,0); root->setSpacing(0);
-        auto *topBar = new QHBoxLayout;
-        auto *title = new QLabel("时间线");
-        title->setStyleSheet("color:#333;font-weight:bold;font-size:13px;padding:4px 8px;border:none;background:#f0f0f0");
-        topBar->addWidget(title);
-        auto *addBtn = new QPushButton("+ 轨道");
-        addBtn->setStyleSheet("background:#e0e0ff;color:#224;border:1px solid #aab;border-radius:3px;padding:2px 8px;font-size:11px");
-        connect(addBtn, &QPushButton::clicked, this, &Timeline::addTrack);
-        topBar->addWidget(addBtn);
-        auto *delBtn = new QPushButton("- 轨道");
-        delBtn->setStyleSheet("background:#ffe0e0;color:#422;border:1px solid #baa;border-radius:3px;padding:2px 8px;font-size:11px");
-        connect(delBtn, &QPushButton::clicked, this, &Timeline::removeTrack);
-        topBar->addWidget(delBtn);
-        m_countLabel = new QLabel("3 条轨道");
-        m_countLabel->setStyleSheet("color:#888;font-size:11px;border:none;background:transparent;padding:4px");
-        topBar->addWidget(m_countLabel); topBar->addStretch();
-        auto *topFrame = new QFrame;
-        topFrame->setStyleSheet("background:#f0f0f0;border-bottom:1px solid #ccc");
-        topFrame->setLayout(topBar); root->addWidget(topFrame);
+    explicit Timeline(QWidget *parent = nullptr);
 
-        m_trackContainer = new QWidget;
-        m_trackLayout = new QVBoxLayout(m_trackContainer);
-        m_trackLayout->setContentsMargins(0,0,0,0); m_trackLayout->setSpacing(0);
-        m_trackContainer->setStyleSheet("background:#f5f5f5");
-        for (int i = 1; i <= 3; i++) addTrack();
+    /// 保持与旧 API 兼容
+    void addBlockToFirstTrack(const QString &name);
+    bool hasBlockSelected() const;
+    void deleteSelectedBlock();
 
-        auto *scroll = new QScrollArea; scroll->setWidgetResizable(true);
-        scroll->setWidget(m_trackContainer); root->addWidget(scroll, 1);
-
-        auto *ruler = new QFrame;
-        ruler->setFixedHeight(24);
-        ruler->setStyleSheet("background:#e8e8e8;border-top:1px solid #ccc");
-        for (int i = 0; i <= 60; i++) {
-            auto *tick = new QLabel(QString("%1s").arg(i), ruler);
-            tick->setStyleSheet("color:#999;font-size:9px;border:none;background:transparent");
-            tick->setFixedWidth(30);
-            tick->move(104 + i * 60 - 15, 2); // 居中在刻度上
-            if (i % 5 != 0) tick->setText(""); // 整 5s 才显示文字
-        }
-        root->addWidget(ruler);
-    }
-
-    int trackCount() const { return m_trackCount; }
-
-    void addBlockToFirstTrack(const QString &fixtureName) {
-        for (int i = 0; i < m_trackLayout->count(); i++) {
-            auto *track = qobject_cast<TimelineTrack *>(m_trackLayout->itemAt(i)->widget());
-            if (track) { track->addBlock(fixtureName); return; }
-        }
-    }
+public slots:
+    void addTrack();
+    void removeTrack();
+    void zoomIn();
+    void zoomOut();
 
 protected:
-    void dragEnterEvent(QDragEnterEvent *e) override {
-        if (e->mimeData()->hasText()) e->acceptProposedAction();
-    }
-    void dropEvent(QDropEvent *e) override {
-        if (!e->mimeData()->hasText()) return;
-        QString name = e->mimeData()->text();
-        // 找到鼠标所在的轨道
-        QPoint localPos = m_trackContainer->mapFrom(this, e->position().toPoint());
-        for (int i = 0; i < m_trackLayout->count(); i++) {
-            auto *w = m_trackLayout->itemAt(i)->widget();
-            if (w && w->geometry().contains(localPos)) {
-                auto *track = qobject_cast<TimelineTrack *>(w);
-                if (track) {
-                    double startSec = (e->position().toPoint().x() - 104) / 60.0;
-                    if (startSec < 0) startSec = 0;
-                    double dur = 5;
-                    if (e->mimeData()->hasFormat("x-timeline-move")) {
-                        auto parts = QString::fromUtf8(e->mimeData()->data("x-timeline-move")).split(",");
-                        if (parts.size() >= 2) dur = parts[1].toDouble();
-                    }
-                    track->addBlock(name, startSec, dur);
-                    e->acceptProposedAction();
-                    return;
-                }
-            }
-        }
-    }
-
-private slots:
-    void addTrack() {
-        m_trackCount++;
-        m_trackLayout->addWidget(new TimelineTrack(QString("轨道 %1").arg(m_trackCount)));
-        m_countLabel->setText(QString("%1 条轨道").arg(m_trackCount));
-    }
-    void removeTrack() {
-        if (m_trackCount <= 1) return;
-        auto *it = m_trackLayout->takeAt(m_trackLayout->count()-1);
-        if (it->widget()) delete it->widget(); delete it;
-        m_trackCount--; m_countLabel->setText(QString("%1 条轨道").arg(m_trackCount));
-    }
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
-    QWidget *m_trackContainer;
-    QVBoxLayout *m_trackLayout;
-    QLabel *m_countLabel;
+    void updateSceneRects();
+    void ensureSceneWidth(qreal neededPx);
+
+    // Top area: ruler
+    QGraphicsScene         *m_rulerScene   = nullptr;
+    GraphicsViewScalable   *m_rulerView    = nullptr;
+    RulerWidget            *m_ruler        = nullptr;
+
+    // Bottom area: tracks
+    QGraphicsScene         *m_trackScene   = nullptr;
+    GraphicsViewScalable   *m_trackView    = nullptr;
+    CompositionWidget      *m_composition  = nullptr;
+
     int m_trackCount = 0;
 };
 
-#endif
+// ============================================================
+//  Timeline implementation
+// ============================================================
+
+inline Timeline::Timeline(QWidget *parent)
+    : QWidget(parent)
+{
+    // ---------- Ruler scene + view ----------
+    m_rulerScene = new QGraphicsScene(this);
+    m_ruler = new RulerWidget;
+    m_rulerScene->addItem(m_ruler);
+
+    m_rulerView = new GraphicsViewScalable;
+    m_rulerView->setScene(m_rulerScene);
+    m_rulerView->setFixedHeight(int(RULER_H) + 2);
+    m_rulerView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_rulerView->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_rulerView->setObjectName("RulerView");
+    m_rulerView->setStyleSheet("QFrame#RulerView { background:#212121; border:none; }");
+
+    // ---------- Track scene + view ----------
+    m_trackScene = new QGraphicsScene(this);
+    m_composition = new CompositionWidget;
+    m_trackScene->addItem(m_composition);
+
+    m_trackView = new GraphicsViewScalable;
+    m_trackView->setScene(m_trackScene);
+    m_trackView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    m_trackView->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_trackView->setObjectName("TrackView");
+    m_trackView->setStyleSheet(
+        "QFrame#TrackView { background:#2a2a2a; border:1px solid #444; }");
+
+    // Horizontal scroll sync (bidirectional)
+    connect(m_trackView->horizontalScrollBar(), &QScrollBar::valueChanged,
+            m_rulerView->horizontalScrollBar(), &QScrollBar::setValue);
+    connect(m_rulerView->horizontalScrollBar(), &QScrollBar::valueChanged,
+            m_trackView->horizontalScrollBar(), &QScrollBar::setValue);
+
+    // ---------- Toolbar ----------
+    auto *tb = new QWidget;
+    tb->setStyleSheet("background:#2d2d2d;");
+    auto *tbl = new QHBoxLayout(tb);
+    tbl->setContentsMargins(4, 2, 4, 2);
+    tbl->setSpacing(4);
+
+    auto *title = new QLabel("时间线");
+    title->setStyleSheet("color:#ccc; font-weight:bold; background:transparent;");
+    tbl->addWidget(title);
+
+    const QString btnStyle =
+        "QPushButton { background:#3a3a3a; color:#ccc; border:1px solid #555; "
+        "border-radius:3px; padding:2px 8px; }"
+        "QPushButton:hover { background:#4a4a4a; }";
+
+    auto *addBtn = new QPushButton("+ 轨道");
+    addBtn->setStyleSheet(btnStyle);
+    connect(addBtn, &QPushButton::clicked, this, &Timeline::addTrack);
+    tbl->addWidget(addBtn);
+
+    auto *delBtn = new QPushButton("- 轨道");
+    delBtn->setStyleSheet(btnStyle);
+    connect(delBtn, &QPushButton::clicked, this, &Timeline::removeTrack);
+    tbl->addWidget(delBtn);
+
+    tbl->addStretch();
+
+    auto *zoomOutBtn = new QPushButton(QString::fromUtf8("\xe2\x88\x92"));  // −
+    zoomOutBtn->setFixedSize(24, 24);
+    zoomOutBtn->setStyleSheet(btnStyle);
+    connect(zoomOutBtn, &QPushButton::clicked, this, [this]() { zoomOut(); });
+    tbl->addWidget(zoomOutBtn);
+
+    auto *zoomInBtn = new QPushButton("+");
+    zoomInBtn->setFixedSize(24, 24);
+    zoomInBtn->setStyleSheet(btnStyle);
+    connect(zoomInBtn, &QPushButton::clicked, this, [this]() { zoomIn(); });
+    tbl->addWidget(zoomInBtn);
+
+    // ---------- Root layout ----------
+    auto *root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+    root->addWidget(tb);
+    root->addWidget(m_rulerView);
+    root->addWidget(m_trackView, 1);
+
+    // Wheel event filter for Ctrl+zoom
+    m_rulerView->viewport()->installEventFilter(this);
+    m_trackView->viewport()->installEventFilter(this);
+
+    // Default: 3 tracks
+    for (int i = 1; i <= 3; i++) addTrack();
+}
+
+inline void Timeline::addBlockToFirstTrack(const QString &name)
+{
+    TrackWidget *t = m_composition->track(0);
+    if (t) {
+        t->addBlock(name);
+        updateSceneRects();
+    }
+}
+
+inline bool Timeline::hasBlockSelected() const
+{
+    for (auto *track : m_composition->tracks())
+        for (auto *blk : track->blocks())
+            if (blk->isSelected()) return true;
+    return false;
+}
+
+inline void Timeline::deleteSelectedBlock()
+{
+    for (auto *track : m_composition->tracks()) {
+        for (auto *blk : track->blocks()) {
+            if (blk->isSelected()) {
+                track->deleteBlock(blk);
+                updateSceneRects();
+                return;  // delete one at a time
+            }
+        }
+    }
+}
+
+inline void Timeline::addTrack()
+{
+    auto *t = new TrackWidget(
+        QString::fromUtf8("轨道 ") + QString::number(++m_trackCount), m_composition);
+    m_composition->addTrack(t);
+    updateSceneRects();
+}
+
+inline void Timeline::removeTrack()
+{
+    if (m_composition->trackCount() <= 1) return;
+    m_composition->removeTrack(m_composition->trackCount() - 1);
+    m_trackCount--;
+    updateSceneRects();
+}
+
+inline void Timeline::zoomIn()
+{
+    m_rulerView->zoomIn();
+    m_trackView->zoomIn();
+    m_rulerView->horizontalScrollBar()->setValue(
+        m_trackView->horizontalScrollBar()->value());
+}
+
+inline void Timeline::zoomOut()
+{
+    m_rulerView->zoomOut();
+    m_trackView->zoomOut();
+    m_rulerView->horizontalScrollBar()->setValue(
+        m_trackView->horizontalScrollBar()->value());
+}
+
+inline bool Timeline::eventFilter(QObject *watched, QEvent *event)
+{
+    if (event->type() == QEvent::Wheel) {
+        QWheelEvent *we = static_cast<QWheelEvent *>(event);
+        if (we->modifiers() & Qt::ControlModifier) {
+            qreal factor = qPow(1.2, we->angleDelta().y() / 240.0);
+            bool ok1 = m_rulerView->scaleView(factor);
+            bool ok2 = m_trackView->scaleView(factor);
+            if (ok1 || ok2) {
+                m_rulerView->horizontalScrollBar()->setValue(
+                    m_trackView->horizontalScrollBar()->value());
+            }
+            return true;
+        }
+        // Normal vertical wheel → pass to track view for vertical scrolling
+        if (watched == m_rulerView->viewport()) {
+            // Forward wheel to track view
+            QCoreApplication::sendEvent(m_trackView->viewport(), event);
+            return true;
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+inline void Timeline::updateSceneRects()
+{
+    // Calculate required width: rightmost block edge + margin
+    qreal maxX = TRACK_LABEL_W + 3000.0;  // minimum ~50 s
+    for (auto *track : m_composition->tracks()) {
+        for (auto *blk : track->blocks()) {
+            qreal right = TRACK_LABEL_W + (blk->posSec() + blk->durSec()) * PX_PER_SEC + 100;
+            if (right > maxX) maxX = right;
+        }
+    }
+    ensureSceneWidth(maxX);
+}
+
+inline void Timeline::ensureSceneWidth(qreal w)
+{
+    // Ruler
+    m_ruler->resize(w, RULER_H);
+    m_rulerScene->setSceneRect(0, 0, w, RULER_H);
+
+    // Composition — must explicitly resize so children expand to full width
+    qreal compH = m_composition->trackCount() * (TRACK_H + 2);
+    m_composition->resize(w, qMax(compH, 1.0));
+    m_trackScene->setSceneRect(0, 0, w, qMax(compH, 1.0));
+}
+
+#endif // TIMELINE_H
