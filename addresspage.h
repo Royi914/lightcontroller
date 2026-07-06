@@ -25,7 +25,7 @@
 #include <functional>
 #include "Fixture.h"
 
-struct AddrEntry { QString model; int channels; };
+struct AddrEntry { QString model; int channels; int quantity = 0; };
 
 class AddrDomainDialog : public QDialog
 {
@@ -67,10 +67,12 @@ public:
             QObject::connect(b, &QPushButton::clicked, this, fn); tbl->addWidget(b);
         };
         makeBtn("新建",   [this](){
-            auto *mb = new QMessageBox(QMessageBox::Warning, "新建", "新建会导致未另存的数据丢失，是否继续？",
-                                       QMessageBox::Yes | QMessageBox::No, this);
-            if (mb->exec() == QMessageBox::Yes) {
-                m_doms.clear(); m_cur = 0; rebuildList(); clearDetail();
+            AddrDomainDialog d(this);
+            if (d.exec() == QDialog::Accepted && !d.model().isEmpty()) {
+                m_doms.clear(); m_cur = 0;
+                m_doms << AddrEntry{d.model(), d.channels(), 0};
+                rebuildList();
+                emit newDomainRequested(d.model(), d.channels());
             }
         });
         makeBtn("打开",   [this](){ onOpen(); });
@@ -103,7 +105,7 @@ public:
         oroot->addWidget(main, 1);
     }
 
-    void addDomain(const QString &model, int ch) { m_doms << AddrEntry{model, ch}; rebuildList(); }
+    void addDomain(const QString &model, int ch, int qty = 1) { m_doms << AddrEntry{model, ch, qty}; rebuildList(); }
     QList<AddrEntry> getDomains() const { return m_doms; }
     void updateFixtures(const QList<Fixture *> &fixtures) {
         m_all = fixtures;
@@ -159,7 +161,7 @@ private slots:
     void onAddDomain() {
         AddrDomainDialog d(this);
         if (d.exec() == QDialog::Accepted && !d.model().isEmpty()) {
-            m_doms << AddrEntry{d.model(), d.channels()};
+            m_doms << AddrEntry{d.model(), d.channels(), 0};
             if (m_doms.size() == 1) m_cur = 0;
             rebuildList();
             emit newDomainRequested(d.model(), d.channels());
@@ -179,7 +181,7 @@ private:
             auto *dot = new QLabel; dot->setFixedSize(10,10);
             dot->setStyleSheet(i == m_cur ? "background:#0f0;border-radius:5px" : "background:transparent;border-radius:5px");
             hl->addWidget(dot);
-            hl->addWidget(new QLabel(QString("灯型号：%1    通道：%2    数量：%3").arg(d.model).arg(d.channels).arg(qty)));
+            hl->addWidget(new QLabel(QString("灯型号：%1    通道：%2    数量：%3").arg(d.model).arg(d.channels).arg(cnts.value(d.model, 0))));
             hl->addStretch();
             if (m_deleteMode) {
                 auto *xBtn = new QPushButton("×"); xBtn->setFixedSize(24,24);

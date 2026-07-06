@@ -16,7 +16,6 @@
 #include "dmxusbwidget.h"
 
 #include <QKeyEvent>
-#include <QCloseEvent>
 #include <QMenu>
 #include <QRegularExpression>
 #include <QMessageBox>
@@ -25,8 +24,6 @@
 #include <QHBoxLayout>
 #include <QBoxLayout>
 #include <QComboBox>
-#include <QDialog>
-#include <QDialogButtonBox>
 #include <QDrag>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -102,11 +99,6 @@ MainWindow::MainWindow(QWidget *parent)
     });
     connect(m_globe3D, &Globe3D::fixtureDeselected, this, [this]() {
         m_selected = nullptr; showLibraryMode();
-    });
-    // 3D 拖拽灯具 → 同步 2D 位置
-    connect(m_globe3D, &Globe3D::fixtureMoved3D, this, [this](Fixture *f, QPointF pos2D) {
-        if (auto *it = m_fixtureItems.value(f))
-            it->setPos(pos2D);
     });
 
     // ===== 灯库 =====
@@ -219,82 +211,20 @@ MainWindow::MainWindow(QWidget *parent)
     ui->timelinePlaceholder->hide();
     ui->timelineHeader->hide();
 
-    // 已添加灯具右键菜单
+    // 已添加灯具右键菜单 → 添加到时间线
     ui->fixtureList->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(ui->fixtureList, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+        if (!m_timeline) return;
         QListWidgetItem *item = ui->fixtureList->itemAt(pos);
         if (!item) return;
-        int row = ui->fixtureList->row(item);
-
-        // Find which fixture this row belongs to
-        Fixture *targetFx = nullptr;
-        Universe *srcUniv = nullptr;
-        int cnt = 0;
-        for (int di = 0; di < m_universes.size() && !targetFx; di++) {
-            auto *u = m_universes[di];
-            if (!u) continue;
-            for (auto *f : u->fixtures()) {
-                if (cnt == row) { targetFx = f; srcUniv = u; break; }
-                cnt++;
-            }
-        }
-        if (!targetFx) return;
-
         QMenu menu;
         QAction *addAction = menu.addAction("添加到时间线");
-        QAction *switchAction = menu.addAction("切换域");
         QAction *chosen = menu.exec(ui->fixtureList->mapToGlobal(pos));
-        if (chosen == addAction && m_timeline) {
+        if (chosen == addAction) {
             QString name = item->text();
-            name = name.section("  ", 1, 1);
+            name = name.section("  ", 1, 1);  // 拿灯名
             if (name.isEmpty()) name = "测试灯";
-            m_timeline->addBlockToFirstTrack(name);
-        } else if (chosen == switchAction) {
-            // Show domain picker dialog
-            QDialog dlg(this);
-            dlg.setWindowTitle("切换域");
-            dlg.setStyleSheet("background:#fff");
-            auto *dl = new QVBoxLayout(&dlg);
-            dl->addWidget(new QLabel(QString("将 %1 切换到：").arg(targetFx->name())));
-            auto *combo = new QComboBox;
-            auto doms = m_addressPage->getDomains();
-            for (int di = 0; di < m_universes.size(); di++) {
-                QString label = QString("域 %1").arg(di + 1);
-                if (di < doms.size())
-                    label += QString(" — %1 (%2ch)").arg(doms[di].model).arg(doms[di].channels);
-                combo->addItem(label, di);
-            }
-            dl->addWidget(combo);
-            auto *btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-            connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-            connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-            dl->addWidget(btns);
-            if (dlg.exec() == QDialog::Accepted) {
-                int targetDi = combo->currentData().toInt();
-                if (targetDi >= 0 && targetDi < m_universes.size()) {
-                    Universe *dstUniv = m_universes[targetDi];
-                    if (dstUniv && dstUniv != srcUniv) {
-                        // Get target domain info
-                        auto doms = m_addressPage->getDomains();
-                        if (targetDi < doms.size()) {
-                            targetFx->setName(doms[targetDi].model);
-                            // Update fixture channels to match new domain if needed
-                            // (keep existing channel count for now)
-                        }
-                        srcUniv->removeFixture(targetFx);
-                        targetFx->setUniverse(targetDi);
-                        dstUniv->addFixture(targetFx);
-                        if (auto *it = m_fixtureItems.value(targetFx))
-                            it->updateFromData();
-                        m_globe3D->updateFixture(targetFx);
-                        refreshFixtureList();
-                        sendDmx();
-                        QList<Fixture *> allFx;
-                        for (auto *uv : m_universes) allFx << uv->fixtures();
-                        m_addressPage->updateFixtures(allFx);
-                    }
-                }
-            }
+            if (m_timeline) m_timeline->addBlockToFirstTrack(name);
         }
     });
 
@@ -315,11 +245,6 @@ void MainWindow::keyPressEvent(QKeyEvent *event)
 {
     if (event->key() != Qt::Key_Delete || m_deleteMode) {
         QMainWindow::keyPressEvent(event);
-        return;
-    }
-    // Timeline block selected → delete it first
-    if (m_timeline && m_timeline->hasBlockSelected()) {
-        m_timeline->deleteSelectedBlock();
         return;
     }
     if (ui->fixtureList->hasFocus()) {
@@ -373,10 +298,6 @@ void MainWindow::switchDomain(int domainIndex)
         m_fixtureItems.insert(f, fitm);
         m_globe3D->addFixture(f);
         m_globe3D->updateFixture(f);
-        connect(fitm, &FixtureItem::positionChanged, this, [this](FixtureItem *item) {
-            if (item && item->fixture())
-                m_globe3D->updateFixturePosition(item->fixture(), item->pos());
-        });
     }
 
     refreshFixtureList();
@@ -500,10 +421,6 @@ void MainWindow::addFixtureToCurrent(const FixtureDef &def, const QPointF &pos)
 
     fitm->updateFromData();
     m_globe3D->addFixture(f, pos);
-    connect(fitm, &FixtureItem::positionChanged, this, [this](FixtureItem *item) {
-        if (item && item->fixture())
-            m_globe3D->updateFixturePosition(item->fixture(), item->pos());
-    });
     refreshFixtureList();
     sendDmx();
     // 收集所有宇宙的灯具更新地址码页面
@@ -797,17 +714,6 @@ void MainWindow::on_actionNew_triggered()
 
 void MainWindow::on_actionSave_triggered() { ui->statusLabel->setText("保存（功能待实现）"); }
 void MainWindow::on_actionExit_triggered() { close(); }
-
-void MainWindow::closeEvent(QCloseEvent *event)
-{
-    if (m_libraryPage && m_libraryPage->isDirty()) {
-        if (!m_libraryPage->maybeSave()) {
-            event->ignore();
-            return;
-        }
-    }
-    QMainWindow::closeEvent(event);
-}
 
 bool MainWindow::eventFilter(QObject *obj, QEvent *event)
 {

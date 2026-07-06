@@ -23,11 +23,11 @@ public:
     explicit RangeDialog(QWidget *parent = nullptr) : QDialog(parent)
     {
         setWindowTitle("自定义通道值域");
-        setMinimumWidth(400);
+        setMinimumWidth(420);
         auto *root = new QVBoxLayout(this);
         m_layout = new QVBoxLayout;
         root->addLayout(m_layout);
-        addRow(); // 至少一行
+        addRow(); // 至少一行，默认 0-255
 
         auto *btnRow = new QHBoxLayout;
         auto *addBtn = new QPushButton("+ 添加行");
@@ -40,7 +40,7 @@ public:
         connect(dlgBtns, &QDialogButtonBox::rejected, this, &QDialog::reject);
         root->addWidget(dlgBtns);
 
-        connect(addBtn, &QPushButton::clicked, this, &RangeDialog::addRow);
+        connect(addBtn, &QPushButton::clicked, this, [this]() { addRow(true); });
     }
 
     QList<ChannelRange> getRanges() const
@@ -60,12 +60,11 @@ public:
 
     void setRanges(const QList<ChannelRange> &ranges)
     {
-        // 清空：container 删除时会级联删除子控件
         for (auto &row : m_rows) delete row.container;
         m_rows.clear();
         while (m_layout->count() > 0) delete m_layout->takeAt(0);
         for (const auto &r : ranges) {
-            addRow();
+            addRow(false);  // don't auto-split when loading saved ranges
             auto &row = m_rows.last();
             row.nameEdit->setText(r.name);
             row.minSpin->setValue(r.minValue);
@@ -75,8 +74,30 @@ public:
     }
 
 private slots:
-    void addRow()
+    void addRow(bool doSplit = true)
     {
+        int newMin = 0, newMax = 255;
+
+        // If splitting, halve the last row's range
+        if (doSplit && !m_rows.isEmpty()) {
+            auto &last = m_rows.last();
+            int lastMin = last.minSpin->value();
+            int lastMax = last.maxSpin->value();
+            int span = lastMax - lastMin;
+            if (span >= 2) {
+                int mid = lastMin + span / 2;
+                m_updatingSpins = true;
+                last.maxSpin->setValue(mid);
+                m_updatingSpins = false;
+                newMin = mid + 1;
+                newMax = lastMax;
+            } else {
+                // Range too small to split — place after with same size
+                newMin = qMin(lastMax + 1, 255);
+                newMax = qMin(newMin + qMax(span, 1), 255);
+            }
+        }
+
         auto *container = new QWidget;
         auto *hl = new QHBoxLayout(container);
         hl->setContentsMargins(0, 0, 0, 0);
@@ -87,19 +108,20 @@ private slots:
 
         auto *minSpin = new QSpinBox;
         minSpin->setRange(0, 255);
+        minSpin->setValue(newMin);
         minSpin->setPrefix("从 ");
         hl->addWidget(minSpin);
 
-        auto *sep = new QLabel("—");
+        auto *sep = new QLabel(QString::fromUtf8("\xe2\x80\x94"));  // em-dash
         hl->addWidget(sep);
 
         auto *maxSpin = new QSpinBox;
         maxSpin->setRange(0, 255);
-        maxSpin->setValue(255);
+        maxSpin->setValue(newMax);
         maxSpin->setPrefix("到 ");
         hl->addWidget(maxSpin);
 
-        auto *delBtn = new QPushButton("×");
+        auto *delBtn = new QPushButton(QString::fromUtf8("\xc3\x97"));  // ×
         delBtn->setFixedSize(24, 24);
         delBtn->setStyleSheet("color:red;font-weight:bold;border:none");
         connect(delBtn, &QPushButton::clicked, this, [this, container]() {
@@ -116,19 +138,51 @@ private slots:
         });
         hl->addWidget(delBtn);
 
+        // Adjacency sync: when min changes, update previous row's max
+        connect(minSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+                [this, container](int val) {
+            if (m_updatingSpins) return;
+            int idx = rowIndex(container);
+            if (idx > 0) {
+                m_updatingSpins = true;
+                m_rows[idx - 1].maxSpin->setValue(val - 1);
+                m_updatingSpins = false;
+            }
+        });
+
+        // Adjacency sync: when max changes, update next row's min
+        connect(maxSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+                [this, container](int val) {
+            if (m_updatingSpins) return;
+            int idx = rowIndex(container);
+            if (idx >= 0 && idx < m_rows.size() - 1) {
+                m_updatingSpins = true;
+                m_rows[idx + 1].minSpin->setValue(val + 1);
+                m_updatingSpins = false;
+            }
+        });
+
         m_rows << Row{container, nameEdit, minSpin, maxSpin};
         m_layout->addWidget(container);
     }
 
 private:
+    int rowIndex(QWidget *container) const
+    {
+        for (int i = 0; i < m_rows.size(); i++)
+            if (m_rows[i].container == container) return i;
+        return -1;
+    }
+
     struct Row {
-        QWidget *container;
+        QWidget   *container;
         QLineEdit *nameEdit;
-        QSpinBox *minSpin;
-        QSpinBox *maxSpin;
+        QSpinBox  *minSpin;
+        QSpinBox  *maxSpin;
     };
-    QList<Row> m_rows;
-    QVBoxLayout *m_layout;
+    QList<Row>    m_rows;
+    QVBoxLayout  *m_layout;
+    bool          m_updatingSpins = false;
 };
 
 // ===== 添加灯具弹窗 =====

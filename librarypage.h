@@ -17,6 +17,7 @@
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QMessageBox>
+#include <QInputDialog>
 #include <QFileDialog>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -84,13 +85,13 @@ public:
         m_listBtn = new QPushButton("  灯具列表");
         m_listBtn->setFixedHeight(36);
         m_listBtn->setStyleSheet("background:#ddd;color:#333;border:1px solid #bbb;border-radius:4px;text-align:left;padding-left:12px");
-        connect(m_listBtn, &QPushButton::clicked, this, [this]() { m_stack->setCurrentIndex(0); });
+        connect(m_listBtn, &QPushButton::clicked, this, [this]() { if (maybeSave()) m_stack->setCurrentIndex(0); });
         tbLayout->addWidget(m_listBtn);
 
         auto *backBtn = new QPushButton("  返回主界面");
         backBtn->setFixedHeight(36);
         backBtn->setStyleSheet("background:#ddd;color:#333;border:1px solid #bbb;border-radius:4px;text-align:left;padding-left:12px");
-        connect(backBtn, &QPushButton::clicked, this, &LibraryPage::goBackRequested);
+        connect(backBtn, &QPushButton::clicked, this, [this]() { if (maybeSave()) emit goBackRequested(); });
         tbLayout->addWidget(backBtn);
         outerRoot->addWidget(toolbar);
 
@@ -103,6 +104,37 @@ public:
 
     void setLibrary(const QList<FixtureDef> &library) { m_library = library; refreshListView(); }
     QList<FixtureDef> library() const { return m_library; }
+    bool isDirty() const { return m_dirty; }
+
+    /// Returns true if it's safe to navigate away (saved / ignored / not dirty)
+    /// Returns false if user clicked X (stay on current page, keep dirty flag)
+    bool maybeSave()
+    {
+        if (!m_dirty) return true;
+        bool isNew = (m_editingIndex < 0);
+
+        QMessageBox mb(this);
+        mb.setWindowTitle(isNew ? "未保存的新建灯具" : "未保存的修改");
+        mb.setText(isNew ? "当前新建灯具数据尚未保存，是否保存？"
+                         : "当前灯具数据修改尚未保存，是否保存？");
+        mb.setIcon(QMessageBox::Question);
+        QPushButton *saveBtn   = mb.addButton("保存", QMessageBox::AcceptRole);
+        QPushButton *ignoreBtn = mb.addButton("忽略", QMessageBox::DestructiveRole);
+        mb.setDefaultButton(saveBtn);
+        mb.setEscapeButton(nullptr);  // only X can close, not Escape
+        mb.exec();
+
+        if (mb.clickedButton() == saveBtn) {
+            onSaveCurrent();                     // saves & clears m_dirty
+            return true;
+        } else if (mb.clickedButton() == ignoreBtn) {
+            m_dirty = false;                     // discard changes
+            m_stack->setCurrentIndex(0);         // back to library list
+            return true;
+        }
+        // X clicked — stay on this page, keep m_dirty, try again next time
+        return false;
+    }
 
 signals:
     void goBackRequested();
@@ -111,16 +143,19 @@ signals:
 private slots:
     void onNewFixture()
     {
+        if (!maybeSave()) return;
         NewFixtureDialog dlg(this);
         if (dlg.exec() != QDialog::Accepted) return;
         QString name = dlg.fixtureName();
         if (name.isEmpty()) { QMessageBox::warning(this, "提示", "名称不能为空"); return; }
         m_editingIndex = -1;
+        m_dirty = false;
         m_detailName = name;
         m_detailChannels = 0;
         m_detailRanges.clear();
         m_committedFlags.clear();
         m_committedNames.clear();
+        m_pendingNames.clear();
         m_channelEdits.clear();
         rebuildDetail();
         m_stack->setCurrentIndex(1);
@@ -128,6 +163,7 @@ private slots:
 
     void onOpenFile()
     {
+        if (!maybeSave()) return;
         QString path = QFileDialog::getOpenFileName(this, "打开灯具文件", "", "JSON 文件 (*.json);;所有文件 (*)");
         if (path.isEmpty()) return;
         QFile f(path);
@@ -166,6 +202,7 @@ private slots:
             m_library[m_editingIndex] = def;
         else
             m_library << def;
+        m_dirty = false;
         refreshListView();
         emit libraryUpdated(m_library);
         m_stack->setCurrentIndex(0);
@@ -193,49 +230,86 @@ private slots:
         if (f.open(QIODevice::WriteOnly)) { f.write(QJsonDocument(arr).toJson()); f.close(); }
     }
 
+    void saveUncommittedText()
+    {
+        m_pendingNames.resize(m_detailChannels);
+        for (int i = 0; i < m_channelEdits.size() && i < m_detailChannels; i++) {
+            if (!m_committedFlags.value(i, false))
+                m_pendingNames[i] = m_channelEdits[i]->text();
+        }
+    }
+
     void onAddChannel()
     {
+        m_dirty = true;
+        saveUncommittedText();
         m_detailChannels++;
         m_detailRanges.resize(m_detailChannels);
         m_committedFlags.resize(m_detailChannels);
         m_committedFlags[m_detailChannels - 1] = false;
         m_committedNames.resize(m_detailChannels);
+        m_pendingNames.resize(m_detailChannels);
+        rebuildDetail();
+    }
+
+    void onAddChannels(int count)
+    {
+        if (count <= 0) return;
+        m_dirty = true;
+        saveUncommittedText();
+        int oldCount = m_detailChannels;
+        m_detailChannels += count;
+        m_detailRanges.resize(m_detailChannels);
+        m_committedFlags.resize(m_detailChannels);
+        m_committedNames.resize(m_detailChannels);
+        m_pendingNames.resize(m_detailChannels);
+        for (int i = oldCount; i < m_detailChannels; i++)
+            m_committedFlags[i] = false;
         rebuildDetail();
     }
 
     void onCommitChannel(int ch)
     {
         if (ch < 0 || ch >= m_detailChannels) return;
+        m_dirty = true;
+        saveUncommittedText();
         m_committedFlags[ch] = true;
         m_committedNames.resize(m_detailChannels);
-        if (ch < m_channelEdits.size())
-            m_committedNames[ch] = m_channelEdits[ch]->text();
+        if (ch < m_channelEdits.size()) {
+            QString t = m_channelEdits[ch]->text();
+            m_committedNames[ch] = t.isEmpty() ? QString("通道%1").arg(ch + 1) : t;
+        }
         rebuildDetail();
     }
 
     void onRemoveChannel(int ch)
     {
         if (ch < 0 || ch >= m_detailChannels) return;
-        // 至少保留一个
         if (m_detailChannels <= 1) return;
+        m_dirty = true;
+        saveUncommittedText();
         m_detailRanges.removeAt(ch);
         m_committedFlags.removeAt(ch);
         m_committedNames.removeAt(ch);
+        m_pendingNames.removeAt(ch);
         m_detailChannels--;
         rebuildDetail();
     }
     void onRowDoubleClicked(int index)
     {
         if (index < 0 || index >= m_library.size()) return;
+        if (!maybeSave()) return;
         m_editingIndex = index;
+        m_dirty = false;
         auto &def = m_library[index];
         m_detailName = def.name;
         m_detailChannels = def.channels;
         m_detailRanges = def.ranges;
         m_detailRanges.resize(m_detailChannels);
-        m_committedFlags.clear(); m_committedNames.clear();
+        m_committedFlags.clear(); m_committedNames.clear(); m_pendingNames.clear();
         m_committedFlags.resize(m_detailChannels);
         m_committedNames.resize(m_detailChannels);
+        m_pendingNames.resize(m_detailChannels);
         for (int i = 0; i < m_detailChannels; i++) {
             m_committedFlags[i] = true;
             m_committedNames[i] = def.channelNames.value(i, "");
@@ -288,7 +362,10 @@ private:
         rightLayout->addWidget(chTitle);
         auto *addBtn = new QPushButton("+ 增加通道");
         addBtn->setStyleSheet("background:#e0e0ff;color:#223;border:1px solid #aab;border-radius:4px;padding:6px");
-        connect(addBtn, &QPushButton::clicked, this, &LibraryPage::onAddChannel);
+        connect(addBtn, &QPushButton::clicked, this, [this]() {
+            bool ok; int n = QInputDialog::getInt(this, "批量增加通道", "要增加几个通道？", 1, 1, 128, 1, &ok);
+            if (ok) onAddChannels(n);
+        });
         rightLayout->addWidget(addBtn);
         m_channelScroll = new QScrollArea; m_channelScroll->setWidgetResizable(true);
         m_channelWidget = new QWidget;
@@ -320,13 +397,15 @@ private:
             row->setStyleSheet(QString("background:%1;border:none").arg(done ? "#efe" : "transparent"));
             row->setMinimumHeight(40);
             auto *hl = new QHBoxLayout(row);
-            hl->addWidget(new QLabel(QString("通道 %1").arg(i+1)));
+            hl->addWidget(new QLabel(QString("通道%1").arg(i+1)));
 
             auto *nameEdit = new QLineEdit;
-            nameEdit->setPlaceholderText("参数名"); nameEdit->setStyleSheet("color:#000;border:1px solid #bbb;padding:2px");
-            // 已确认则显示已保存的名字
+            nameEdit->setPlaceholderText(QString("通道%1").arg(i + 1));
+            nameEdit->setStyleSheet("color:#000;border:1px solid #bbb;padding:2px");
             if (done && i < m_committedNames.size() && !m_committedNames[i].isEmpty())
                 nameEdit->setText(m_committedNames[i]);
+            else if (!done && i < m_pendingNames.size() && !m_pendingNames[i].isEmpty())
+                nameEdit->setText(m_pendingNames[i]);  // restore uncommitted text
             nameEdit->setReadOnly(done);
             hl->addWidget(nameEdit, 2);
             m_channelEdits << nameEdit;
@@ -390,7 +469,7 @@ private:
             if (!m_committedFlags.value(i, false)) continue;
             idx++;
             QString name = (i < m_committedNames.size() && !m_committedNames[i].isEmpty())
-                ? m_committedNames[i] : QString("通道 %1").arg(idx);
+                ? m_committedNames[i] : QString("通道%1").arg(idx);
 
             auto *row = new QHBoxLayout;
             row->setAlignment(Qt::AlignVCenter);
@@ -403,9 +482,11 @@ private:
             else if (name.contains("蓝") || nLower == "b") mark->setStyleSheet("background:#2850dc;border-radius:6px;border:1px solid #999");
             else mark->setStyleSheet("background:transparent;border:none");
             row->addWidget(mark);
-            auto *label = new QLabel(name);
-            label->setFixedWidth(90); label->setStyleSheet("color:#222;font-size:12px;border:none;padding:2px 4px");
+            QString displayName = name.contains("通道") ? name : QString("通道%1  %2").arg(i + 1).arg(name);
+            auto *label = new QLabel(displayName);
+            label->setFixedWidth(100); label->setStyleSheet("color:#222;font-size:12px;border:none;padding:2px 4px");
             row->addWidget(label);
+            row->addSpacing(8);
 
             if (i < m_detailRanges.size() && !m_detailRanges[i].isEmpty()) {
                 auto *combo = new QComboBox;
@@ -477,7 +558,7 @@ private:
             if (!m_committedFlags.value(i, false)) continue;
             cnt++;
             QString nm = i < m_committedNames.size() ? m_committedNames[i] : "";
-            def.channelNames << (nm.isEmpty() ? QString("通道 %1").arg(cnt) : nm);
+            def.channelNames << (nm.isEmpty() ? QString("通道%1").arg(cnt) : nm);
             def.ranges << (i < m_detailRanges.size() ? m_detailRanges[i] : QList<ChannelRange>());
         }
         def.channels = cnt;
@@ -486,6 +567,7 @@ private:
 
     QList<FixtureDef> m_library;
     int m_editingIndex = -1;
+    bool m_dirty = false;
     QWidget *m_listContainer;
     QVBoxLayout *m_listLayout;
     QLabel *m_detailTitleLabel = nullptr;
@@ -500,6 +582,7 @@ private:
     QList<QList<ChannelRange>> m_detailRanges;
     QList<bool> m_committedFlags;
     QStringList m_committedNames;
+    QStringList m_pendingNames;
     QStackedWidget *m_stack;
     QPushButton *m_listBtn;
 };

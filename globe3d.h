@@ -21,9 +21,9 @@ struct GlobeFixture {
 
 struct OrbitCamera {
     QVector3D target = QVector3D(0, 0, 0);
-    float     distance = 25.0f;
-    float     azimuth  = 45.0f;
-    float     altitude = 30.0f;
+    float     distance = 35.0f;
+    float     azimuth  = 0.0f;    // aligned with 2D X axis
+    float     altitude = 85.0f;   // near top-down
 
     QMatrix4x4 viewMatrix() const;
     void rotate(float dAz, float dAlt);
@@ -41,11 +41,13 @@ public:
     void addFixture(Fixture *f, const QPointF &pos2D = QPointF());
     void removeFixture(Fixture *f);
     void updateFixture(Fixture *f);
+    void updateFixturePosition(Fixture *f, const QPointF &pos2D);
     void clear();
 
 signals:
     void fixtureSelected(Fixture *f);
     void fixtureDeselected();
+    void fixtureMoved3D(Fixture *f, QPointF pos2D);
 
 protected:
     void initializeGL() override;

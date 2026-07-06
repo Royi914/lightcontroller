@@ -1,0 +1,5 @@
+set(__QT_DEPLOY_TARGET_lightprotocol_FILE D:/light controller app/b/liblightprotocol.a)
+set(__QT_DEPLOY_TARGET_lightprotocol_TYPE STATIC_LIBRARY)
+set(__QT_DEPLOY_TARGET_LightController_FILE D:/light controller app/b/LightController.exe)
+set(__QT_DEPLOY_TARGET_LightController_TYPE EXECUTABLE)
+set(__QT_DEPLOY_TARGET_LightController_RUNTIME_DLLS C:/Qt/6.11.1/mingw_64/bin/Qt6Network.dll;C:/Qt/6.11.1/mingw_64/bin/Qt6OpenGLWidgets.dll;C:/Qt/6.11.1/mingw_64/bin/Qt6Widgets.dll;C:/Qt/6.11.1/mingw_64/bin/Qt6OpenGL.dll;C:/Qt/6.11.1/mingw_64/bin/Qt6Gui.dll;C:/Qt/6.11.1/mingw_64/bin/Qt6Core.dll)

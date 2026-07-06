@@ -180,7 +180,6 @@ public:
     void addBlock(const QString &blockName);
     void addExistingBlock(BlockWidget *b);
     void removeBlock(BlockWidget *b);
-    void deleteBlock(BlockWidget *b);
     QList<BlockWidget *> blocks() const { return m_blocks; }
     void validateBlock(BlockWidget *self);
 
@@ -230,19 +229,10 @@ public:
         QRectF r = boundingRect().adjusted(1, 1, -1, -1);
         p->setRenderHint(QPainter::Antialiasing);
         bool ghost = m_trackSwitching && !m_overTarget;
-
-        // Fill
         p->setPen(QPen(QColor(0xc0, 0x90, 0x20), 0));
         p->setBrush(ghost ? QColor(0xf0, 0xc0, 0x40, 120)
                           : QColor(0xf0, 0xc0, 0x40));
         p->drawRoundedRect(r, 4, 4);
-
-        // Selection highlight
-        if (isSelected()) {
-            p->setBrush(Qt::NoBrush);
-            p->setPen(QPen(QColor(0x00, 0xaa, 0xff), 2.0));
-            p->drawRoundedRect(r, 4, 4);
-        }
 
         p->setPen(ghost ? QColor(0x22, 0x22, 0x22, 120) : QColor(0x22, 0x22, 0x22));
         QFont f("Arial"); f.setPixelSize(10); p->setFont(f);
@@ -266,15 +256,16 @@ protected:
         if (e->button() != Qt::LeftButton) return;
         m_dragStart      = e->scenePos();
         m_dragStartScene = e->scenePos();
+        m_grabOffset     = e->pos();  // mouse pos within the block
         m_origPos        = m_posSec;
         m_origDur        = m_durSec;
         m_resizing       = (size().width() - e->pos().x()) < RESIZE_MARGIN;
         m_dragging       = true;
-        m_hasMoved       = false;
         m_trackSwitching = false;
         m_overTarget     = false;
         m_origTrack      = m_track;
         m_targetTrack    = nullptr;
+        setZValue(10);  // raise above other blocks
         e->accept();
     }
 
@@ -282,25 +273,17 @@ protected:
     {
         if (!m_dragging) return;
 
-        qreal totalDx = e->scenePos().x() - m_dragStartScene.x();
-        qreal totalDy = e->scenePos().y() - m_dragStartScene.y();
-        if (qAbs(totalDx) > 3.0 || qAbs(totalDy) > 3.0)
-            m_hasMoved = true;
+        qreal dy = e->scenePos().y() - m_dragStartScene.y();
 
-        // Track switching
-        if (!m_resizing && (m_trackSwitching || qAbs(totalDy) > TRACK_SWITCH_DY)) {
-            if (!m_trackSwitching) {
-                m_trackSwitching = true;
-                // Record grab point in block-local coords before reparenting
-                m_grabPoint = mapFromScene(e->scenePos());
-                // Reparent to CompositionWidget so we render above ALL tracks
-                QGraphicsItem *comp = m_origTrack->parentItem();
-                if (comp) setParentItem(comp);
-            }
-            // Position so that m_grabPoint stays under the cursor
-            QPointF localTarget = parentItem()->mapFromScene(e->scenePos()) - m_grabPoint;
-            setPos(localTarget);
+        // Detect track-switch intent, or already switching
+        if (!m_resizing && (m_trackSwitching || qAbs(dy) > TRACK_SWITCH_DY)) {
+            m_trackSwitching = true;
+            // Block follows mouse, keeping the original grab point under cursor
+            QPointF parentPos = mapToParent(e->scenePos());
+            setPos(parentPos.x() - m_grabOffset.x(),
+                   parentPos.y() - m_grabOffset.y());
 
+            // Find target track under cursor
             TrackWidget *target = findTrackAtSceneY(e->scenePos().y());
             m_targetTrack = (target && target != m_origTrack) ? target : nullptr;
             m_overTarget  = (m_targetTrack != nullptr);
@@ -322,21 +305,22 @@ protected:
     void mouseReleaseEvent(QGraphicsSceneMouseEvent *) override
     {
         m_dragging = false;
+        setZValue(0);
         setCursor(Qt::OpenHandCursor);
 
         if (m_trackSwitching) {
             if (m_targetTrack) {
                 // Move to target track
                 m_origTrack->removeBlock(this);
-                setParentItem(m_targetTrack);  // scene pos preserved
+                setParentItem(m_targetTrack);
                 m_track = m_targetTrack;
+                // Convert scene x back to posSec
                 qreal newPosSec = qMax((scenePos().x() - TRACK_LABEL_W) / PX_PER_SEC, 0.0);
                 m_posSec = newPosSec;
                 m_targetTrack->addExistingBlock(this);
                 m_targetTrack->validateBlock(this);
             } else {
-                // Return to original track
-                setParentItem(m_origTrack);  // scene pos preserved
+                // Snap back to original position
                 setPosSec(m_origPos);
             }
             m_trackSwitching = false;
@@ -344,9 +328,6 @@ protected:
             m_overTarget  = false;
             applyGeo();
             update();
-        } else if (!m_hasMoved) {
-            if (scene()) scene()->clearSelection();
-            setSelected(true);
         }
     }
 
@@ -384,14 +365,13 @@ private:
     QString      m_name;
     double       m_posSec      = 0;
     double       m_durSec      = 5;
-    QPointF      m_dragStart;
-    QPointF      m_dragStartScene;
-    QPointF      m_grabPoint;         // mouse pos in block-local coords during switch
+    QPointF      m_dragStart;       // x-only for normal drag
+    QPointF      m_dragStartScene;  // full scene pos for track switch
+    QPointF      m_grabOffset;      // mouse pos within block at press
     double       m_origPos     = 0;
     double       m_origDur     = 5;
     bool         m_dragging    = false;
     bool         m_resizing    = false;
-    bool         m_hasMoved    = false;
     bool         m_trackSwitching = false;
     bool         m_overTarget  = false;
 };
@@ -428,13 +408,6 @@ inline void TrackWidget::removeBlock(BlockWidget *b)
     m_blocks.removeOne(b);
 }
 
-inline void TrackWidget::deleteBlock(BlockWidget *b)
-{
-    m_blocks.removeOne(b);
-    if (b->scene()) b->scene()->removeItem(b);
-    b->deleteLater();
-}
-
 inline void TrackWidget::validateBlock(BlockWidget *self)
 {
     bool changed = true;
@@ -455,9 +428,8 @@ inline void TrackWidget::paint(QPainter *p, const QStyleOptionGraphicsItem *, QW
 {
     QRectF r = boundingRect();
     p->fillRect(r, QColor(0x38, 0x38, 0x38));
-
-    // Top divider — clearly separates tracks
-    p->fillRect(QRectF(0, 0, r.width(), 3), QColor(0x99, 0x99, 0x99));
+    p->setPen(QPen(QColor(0x50, 0x50, 0x50), 0));
+    p->drawLine(QPointF(r.left(), r.bottom()), QPointF(r.right(), r.bottom()));
 
     // Track label (left of the 0s origin)
     QRectF labelRect(0, 0, TRACK_LABEL_W - 2, r.height());
@@ -467,7 +439,7 @@ inline void TrackWidget::paint(QPainter *p, const QStyleOptionGraphicsItem *, QW
     p->drawText(labelRect.adjusted(4, 0, 0, 0), Qt::AlignVCenter | Qt::AlignLeft, m_name);
 
     // Vertical divider line between label and timeline area
-    p->setPen(QPen(QColor(0x60, 0x60, 0x60), 0));
+    p->setPen(QPen(QColor(0x50, 0x50, 0x50), 0));
     p->drawLine(QPointF(TRACK_LABEL_W, 0), QPointF(TRACK_LABEL_W, r.height()));
 }
 
@@ -494,15 +466,11 @@ public:
         : QGraphicsWidget(parent)
     {
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        setFlag(QGraphicsItem::ItemHasNoContents);
         m_layout = new QGraphicsLinearLayout(Qt::Vertical);
         m_layout->setContentsMargins(0, 0, 0, 0);
-        m_layout->setSpacing(2);
+        m_layout->setSpacing(1);
         setLayout(m_layout);
-    }
-
-    void paint(QPainter *, const QStyleOptionGraphicsItem *, QWidget *) override
-    {
-        // Dividers are painted by TrackWidget (top border of each track)
     }
 
     void addTrack(TrackWidget *t, int index = -1)
@@ -563,8 +531,6 @@ public:
 
     /// 保持与旧 API 兼容
     void addBlockToFirstTrack(const QString &name);
-    bool hasBlockSelected() const;
-    void deleteSelectedBlock();
 
 public slots:
     void addTrack();
@@ -696,27 +662,6 @@ inline void Timeline::addBlockToFirstTrack(const QString &name)
     }
 }
 
-inline bool Timeline::hasBlockSelected() const
-{
-    for (auto *track : m_composition->tracks())
-        for (auto *blk : track->blocks())
-            if (blk->isSelected()) return true;
-    return false;
-}
-
-inline void Timeline::deleteSelectedBlock()
-{
-    for (auto *track : m_composition->tracks()) {
-        for (auto *blk : track->blocks()) {
-            if (blk->isSelected()) {
-                track->deleteBlock(blk);
-                updateSceneRects();
-                return;  // delete one at a time
-            }
-        }
-    }
-}
-
 inline void Timeline::addTrack()
 {
     auto *t = new TrackWidget(
@@ -792,9 +737,8 @@ inline void Timeline::ensureSceneWidth(qreal w)
     m_ruler->resize(w, RULER_H);
     m_rulerScene->setSceneRect(0, 0, w, RULER_H);
 
-    // Composition — must explicitly resize so children expand to full width
-    qreal compH = m_composition->trackCount() * (TRACK_H + 2);
-    m_composition->resize(w, qMax(compH, 1.0));
+    // Composition
+    qreal compH = m_composition->trackCount() * (TRACK_H + 1);
     m_trackScene->setSceneRect(0, 0, w, qMax(compH, 1.0));
 }
 

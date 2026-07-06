@@ -33,5 +33,11 @@ void FixtureItem::updateFromData()
 void FixtureItem::mousePressEvent(QGraphicsSceneMouseEvent *event)
 {
     QGraphicsEllipseItem::mousePressEvent(event);
-    // 点击后通知 MainWindow（通过 scene 的 focusItemChanged 信号）
+}
+
+QVariant FixtureItem::itemChange(GraphicsItemChange change, const QVariant &value)
+{
+    if (change == ItemPositionHasChanged)
+        emit positionChanged(this);
+    return QGraphicsEllipseItem::itemChange(change, value);
 }

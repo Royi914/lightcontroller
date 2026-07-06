@@ -11,7 +11,7 @@ QMatrix4x4 OrbitCamera::viewMatrix() const
     m.translate(-target);
     return m;
 }
-void OrbitCamera::rotate(float dAz, float dAlt) { azimuth += dAz; altitude += dAlt; if (altitude > 89) altitude = 89; if (altitude < 5) altitude = 5; }
+void OrbitCamera::rotate(float dAz, float dAlt) { azimuth += dAz; altitude += dAlt; if (altitude > 89) altitude = 89; if (altitude < 1) altitude = 1; }
 void OrbitCamera::zoom(float d) { distance -= d; if (distance < 3) distance = 3; if (distance > 100) distance = 100; }
 void OrbitCamera::pan(float dx, float dy) { target += QVector3D(dx, dy, 0); }
 
@@ -32,10 +32,18 @@ void Globe3D::removeFixture(Fixture *f)
 }
 void Globe3D::updateFixture(Fixture *)
 {
-    // 2D/3D 圆圈始终亮白，不随通道值变化
     for (auto &gf : m_fixtures)
         gf.color = Qt::white;
     update();
+}
+void Globe3D::updateFixturePosition(Fixture *f, const QPointF &pos2D)
+{
+    for (auto &gf : m_fixtures) {
+        if (gf.fixture == f) {
+            gf.position = QVector3D(pos2D.x() / 40.0f, 0, pos2D.y() / 40.0f);
+            update(); break;
+        }
+    }
 }
 void Globe3D::clear() { m_fixtures.clear(); m_selected = nullptr; update(); }
 
@@ -74,8 +82,8 @@ void Globe3D::drawGrid()
     glDisable(GL_LIGHTING); glColor3f(0.18f, 0.18f, 0.22f); glLineWidth(1);
     glBegin(GL_LINES);
     for (int i = -10; i <= 10; i++) {
-        glVertex3f(i, 0, -10); glVertex3f(i, 0, 10);
-        glVertex3f(-10, 0, i); glVertex3f(10, 0, i);
+        glVertex3f(i, -0.02f, -10); glVertex3f(i, -0.02f, 10);
+        glVertex3f(-10, -0.02f, i); glVertex3f(10, -0.02f, i);
     }
     glEnd(); glEnable(GL_LIGHTING);
 }
@@ -133,6 +141,9 @@ void Globe3D::mouseMoveEvent(QMouseEvent *e)
     if (m_leftPressed && m_selected) {
         for (auto &gf : m_fixtures) if (gf.fixture == m_selected) {
             gf.position += QVector3D(dx * 0.05f, 0, -dy * 0.05f);
+            // Sync back to 2D coords
+            QPointF pos2D(gf.position.x() * 40.0f, gf.position.z() * 40.0f);
+            emit fixtureMoved3D(m_selected, pos2D);
             update(); break;
         }
     }

@@ -11,8 +11,9 @@
 
 class Fixture;
 
-class FixtureItem : public QGraphicsEllipseItem
+class FixtureItem : public QObject, public QGraphicsEllipseItem
 {
+    Q_OBJECT
 public:
     explicit FixtureItem(Fixture *fixture, QGraphicsItem *parent = nullptr);
 
@@ -24,8 +25,12 @@ public:
     enum { Type = QGraphicsItem::UserType + 1 };
     int type() const override { return Type; }
 
+signals:
+    void positionChanged(FixtureItem *item);
+
 protected:
     void mousePressEvent(QGraphicsSceneMouseEvent *event) override;
+    QVariant itemChange(GraphicsItemChange change, const QVariant &value) override;
 
 private:
     Fixture *m_fixture;
