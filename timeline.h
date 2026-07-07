@@ -7,6 +7,7 @@
 #include <QGraphicsView>
 #include <QGraphicsLinearLayout>
 #include <QGraphicsSceneMouseEvent>
+#include <QCoreApplication>
 #include <QScrollBar>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -18,6 +19,9 @@
 #include <QtMath>
 #include <limits>
 #include <QList>
+#include <QTimer>
+#include <QElapsedTimer>
+#include <QGraphicsLineItem>
 
 // ============================================================
 //  Constants
@@ -97,7 +101,6 @@ public:
     void paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWidget *) override
     {
         const qreal lod = option->levelOfDetailFromTransform(painter->worldTransform());
-        const qreal pxPerSec = PX_PER_SEC * lod * lod;
         const QRectF exposed = option->exposedRect;
         const qreal h = boundingRect().height();
 
@@ -116,20 +119,22 @@ public:
         painter->setPen(pen);
 
         QFont font("Arial");
-        font.setPixelSize(10);
+        font.setPixelSize(11);
+        font.setBold(true);
         painter->setFont(font);
 
         const qreal tickShort = h * 0.55;
         const qreal tickFull  = h;
 
-        if (pxPerSec >= 4) {
-            drawTicks(painter, exposed, pxPerSec, 1,   "s", 5,  tickShort, tickFull, h);
-        } else if (pxPerSec * 10 >= 4) {
-            drawTicks(painter, exposed, pxPerSec * 10, 10, "s", 6, tickShort, tickFull, h);
-        } else if (pxPerSec * 60 >= 4) {
-            drawTicks(painter, exposed, pxPerSec * 60, 60, "s", 0, tickShort, tickFull, h);
-        } else if (pxPerSec * 300 >= 4) {
-            drawTicks(painter, exposed, pxPerSec * 300, 300, "s", 0, tickShort, tickFull, h);
+        // Tick spacing uses fixed scene coords (60px/s), lod only picks the zoom tier
+        if (PX_PER_SEC * lod >= 4) {
+            drawTicks(painter, exposed, PX_PER_SEC, 1, "s", 5, tickShort, tickFull, h);
+        } else if (PX_PER_SEC * 10 * lod >= 2) {
+            drawTicks(painter, exposed, PX_PER_SEC * 10, 10, "s", 6, tickShort, tickFull, h);
+        } else if (PX_PER_SEC * 60 * lod >= 2) {
+            drawTicks(painter, exposed, PX_PER_SEC * 60, 60, "s", 0, tickShort, tickFull, h);
+        } else {
+            drawTicks(painter, exposed, PX_PER_SEC * 300, 300, "s", 0, tickShort, tickFull, h);
         }
     }
 
@@ -571,6 +576,12 @@ public slots:
     void removeTrack();
     void zoomIn();
     void zoomOut();
+    void play();
+    void pause();
+    void resetPlayhead();
+    void seekTo(qreal sceneX);
+    void stepPrev();
+    void stepNext();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -578,6 +589,7 @@ protected:
 private:
     void updateSceneRects();
     void ensureSceneWidth(qreal neededPx);
+    void updatePlayheadLine();
 
     // Top area: ruler
     QGraphicsScene         *m_rulerScene   = nullptr;
@@ -590,6 +602,14 @@ private:
     CompositionWidget      *m_composition  = nullptr;
 
     int m_trackCount = 0;
+
+    // Playhead
+    QGraphicsLineItem *m_playhead  = nullptr;
+    QTimer            *m_playTimer  = nullptr;
+    QElapsedTimer      m_playClock;
+    qreal              m_playStartX = TRACK_LABEL_W;
+    qreal              m_playPos    = TRACK_LABEL_W;
+    static constexpr qreal PLAY_SPEED = PX_PER_SEC; // 1s per second
 };
 
 // ============================================================
@@ -617,13 +637,49 @@ inline Timeline::Timeline(QWidget *parent)
     m_composition = new CompositionWidget;
     m_trackScene->addItem(m_composition);
 
+    // Playhead: blue vertical line across all tracks
+    m_playhead = new QGraphicsLineItem;
+    QPen hpPen(QColor(0x33, 0x88, 0xff), 0);
+    hpPen.setCosmetic(true);
+    hpPen.setWidthF(2.0);
+    m_playhead->setPen(hpPen);
+    m_playhead->setZValue(100);
+    m_playhead->setLine(0, 0, 0, 0);
+    m_trackScene->addItem(m_playhead);
+
+    m_playTimer = new QTimer(this);
+    m_playTimer->setInterval(33); // ~30 fps
+    connect(m_playTimer, &QTimer::timeout, this, [this]() {
+        qreal elapsed = qreal(m_playClock.elapsed()) / 1000.0;
+        m_playPos = m_playStartX + elapsed * PX_PER_SEC;
+        updatePlayheadLine();
+        // Smooth scroll: keep playhead in the right 2/3 of view
+        if (auto *sb = m_trackView->horizontalScrollBar()) {
+            qreal viewW = m_trackView->viewport()->width();
+            qreal target = sb->value();
+            if (m_playPos > target + viewW * 0.75)
+                target = m_playPos - viewW * 0.25;
+            // Animate scroll smoothly
+            qreal diff = target - sb->value();
+            if (qAbs(diff) > 2.0)
+                sb->setValue(int(sb->value() + diff * 0.3));
+        }
+    });
+
     m_trackView = new GraphicsViewScalable;
     m_trackView->setScene(m_trackScene);
     m_trackView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     m_trackView->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_trackView->setViewportUpdateMode(QGraphicsView::MinimalViewportUpdate);
+    m_trackView->setOptimizationFlag(QGraphicsView::DontAdjustForAntialiasing, true);
     m_trackView->setObjectName("TrackView");
     m_trackView->setStyleSheet(
-        "QFrame#TrackView { background:#2a2a2a; border:1px solid #444; }");
+        "QFrame#TrackView { background:#2a2a2a; border:1px solid #444; }"
+        "QScrollBar:horizontal { background:#3a3a3a; height:10px; border-radius:2px; }"
+        "QScrollBar::handle:horizontal { background:#888; min-width:40px; border-radius:3px; margin:1px 2px; }"
+        "QScrollBar::handle:horizontal:hover { background:#aaa; }"
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; }"
+        "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:#2a2a2a; }");
 
     // Horizontal scroll sync (bidirectional)
     connect(m_trackView->horizontalScrollBar(), &QScrollBar::valueChanged,
@@ -723,6 +779,7 @@ inline void Timeline::addTrack()
         QString::fromUtf8("轨道 ") + QString::number(++m_trackCount), m_composition);
     m_composition->addTrack(t);
     updateSceneRects();
+    updatePlayheadLine();
 }
 
 inline void Timeline::removeTrack()
@@ -731,6 +788,7 @@ inline void Timeline::removeTrack()
     m_composition->removeTrack(m_composition->trackCount() - 1);
     m_trackCount--;
     updateSceneRects();
+    updatePlayheadLine();
 }
 
 inline void Timeline::zoomIn()
@@ -749,6 +807,74 @@ inline void Timeline::zoomOut()
         m_trackView->horizontalScrollBar()->value());
 }
 
+inline void Timeline::play()
+{
+    if (!m_playTimer) return;
+    if (!m_playTimer->isActive()) {
+        // Resume from where the line currently is
+        m_playStartX = m_playPos;
+        m_playClock.start();
+        updatePlayheadLine();
+        if (auto *sb = m_trackView->horizontalScrollBar()) {
+            if (m_playPos < sb->value() + 10)
+                sb->setValue(qMax(0, int(m_playPos - 40)));
+        }
+        m_playTimer->start();
+    }
+}
+
+inline void Timeline::pause()
+{
+    if (m_playTimer) {
+        m_playTimer->stop();
+        m_playStartX = m_playPos;
+    }
+}
+
+inline void Timeline::resetPlayhead()
+{
+    m_playPos = TRACK_LABEL_W;
+    m_playStartX = TRACK_LABEL_W;
+    updatePlayheadLine();
+    if (auto *sb = m_trackView->horizontalScrollBar())
+        sb->setValue(0);
+}
+
+inline void Timeline::seekTo(qreal sceneX)
+{
+    bool wasPlaying = m_playTimer && m_playTimer->isActive();
+    if (wasPlaying) m_playTimer->stop();
+    m_playPos = sceneX;
+    m_playStartX = sceneX;
+    updatePlayheadLine();
+    if (wasPlaying) { m_playClock.start(); m_playTimer->start(); }
+}
+
+inline void Timeline::stepPrev()
+{
+    pause();
+    m_playPos = qMax(qreal(TRACK_LABEL_W), m_playPos - PX_PER_SEC);
+    updatePlayheadLine();
+    if (auto *sb = m_trackView->horizontalScrollBar())
+        sb->setValue(qMax(0, int(m_playPos - 100)));
+}
+
+inline void Timeline::stepNext()
+{
+    pause();
+    m_playPos += PX_PER_SEC;
+    updatePlayheadLine();
+    if (auto *sb = m_trackView->horizontalScrollBar())
+        sb->setValue(int(m_playPos - 100));
+}
+
+inline void Timeline::updatePlayheadLine()
+{
+    if (!m_playhead) return;
+    qreal h = m_composition ? m_composition->size().height() : 300;
+    m_playhead->setLine(m_playPos, 0, m_playPos, h);
+}
+
 inline bool Timeline::eventFilter(QObject *watched, QEvent *event)
 {
     if (event->type() == QEvent::Wheel) {
@@ -763,11 +889,24 @@ inline bool Timeline::eventFilter(QObject *watched, QEvent *event)
             }
             return true;
         }
-        // Normal vertical wheel → pass to track view for vertical scrolling
         if (watched == m_rulerView->viewport()) {
-            // Forward wheel to track view
             QCoreApplication::sendEvent(m_trackView->viewport(), event);
             return true;
+        }
+    }
+    // Click/drag on ruler or track → seek playhead
+    if (watched == m_rulerView->viewport() || watched == m_trackView->viewport()) {
+        if (event->type() == QEvent::MouseButtonPress ||
+            event->type() == QEvent::MouseMove) {
+            QMouseEvent *me = static_cast<QMouseEvent *>(event);
+            if (me->buttons() & Qt::LeftButton) {
+                QGraphicsView *gv = (watched == m_rulerView->viewport())
+                    ? static_cast<QGraphicsView *>(m_rulerView)
+                    : static_cast<QGraphicsView *>(m_trackView);
+                QPointF scenePt = gv->mapToScene(me->pos());
+                seekTo(qMax(qreal(TRACK_LABEL_W), scenePt.x()));
+                return true;
+            }
         }
     }
     return QWidget::eventFilter(watched, event);

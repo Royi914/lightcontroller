@@ -9,6 +9,7 @@
 #include "fixturedialog.h"
 #include "addresspage.h"
 #include "librarypage.h"
+#include "programpage.h"
 #include "globe3d.h"
 #include "colorwheel.h"
 #include "beamwidget.h"
@@ -31,6 +32,8 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QScrollArea>
+#include <QStyle>
+#include <QApplication>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -65,7 +68,6 @@ MainWindow::MainWindow(QWidget *parent)
     // ===== 3D 视图 + 切换 =====
     m_globe3D = new Globe3D;
     m_viewStack = new QStackedWidget;
-    // graphicsView 原本在 viewFrame 布局中，取出来放到 viewStack 里
     ui->viewLayout->removeWidget(ui->graphicsView);
     m_viewStack->addWidget(ui->graphicsView);   // index 0 = 2D
     m_viewStack->addWidget(m_globe3D);          // index 1 = 3D
@@ -78,12 +80,12 @@ MainWindow::MainWindow(QWidget *parent)
     m_btn2D = new QPushButton("2D");
     m_btn3D = new QPushButton("3D");
     m_btn2D->setFixedSize(40, 24); m_btn3D->setFixedSize(40, 24);
-    m_btn2D->setStyleSheet("background:#335;color:#fff;font-weight:bold"); // 默认选中
+    m_btn2D->setStyleSheet("background:#335;color:#fff;font-weight:bold");
     m_btn3D->setStyleSheet("background:#222;color:#888");
     btnLayout->addWidget(m_btn2D);
     btnLayout->addWidget(m_btn3D);
     btnLayout->addStretch();
-    ui->viewLayout->insertWidget(0, btnBar);  // 插入到最顶部
+    ui->viewLayout->insertWidget(0, btnBar);
 
     connect(m_btn2D, &QPushButton::clicked, this, [this]() {
         m_viewStack->setCurrentIndex(0);
@@ -118,11 +120,45 @@ MainWindow::MainWindow(QWidget *parent)
     m_libraryPage = new LibraryPage;
     m_libraryPage->setLibrary(m_library);
     m_addressPage = new AddressPage;
+    m_programPage = new ProgramPage;
+
+    // 舞台选择页（wrapper：StageLayout + 返回按钮）
+    auto *stagePage = new QWidget;
+    auto *stagePageLayout = new QVBoxLayout(stagePage);
+    stagePageLayout->setContentsMargins(0, 0, 0, 0);
+    m_stageLayout = new StageLayout;
+    stagePageLayout->addWidget(m_stageLayout, 1);
+
+    // 底部栏：返回 + 提示
+    auto *stageBottom = new QWidget;
+    stageBottom->setFixedHeight(36);
+    stageBottom->setStyleSheet("background:#f0f0f0; border-top:1px solid #ddd;");
+    auto *sbl = new QHBoxLayout(stageBottom);
+    sbl->setContentsMargins(12, 4, 12, 4);
+    auto *stageBackBtn = new QPushButton("← 返回");
+    stageBackBtn->setFixedHeight(28);
+    stageBackBtn->setStyleSheet("background:#ddd;color:#333;border:1px solid #bbb;border-radius:3px;padding:0 12px;");
+    connect(stageBackBtn, &QPushButton::clicked, this, [this]() { m_masterStack->setCurrentIndex(0); });
+    sbl->addWidget(stageBackBtn);
+    sbl->addStretch();
+    auto *stageHint = new QLabel("选择灯具 → 点击右下角「进入编程」");
+    stageHint->setStyleSheet("color:#888; font-size:11px; border:none;");
+    sbl->addWidget(stageHint);
+    stagePageLayout->addWidget(stageBottom);
+
+    // Stage "进入编程" → 打开编程编辑页
+    connect(m_stageLayout, &StageLayout::enterProgramRequested, this, [this]() {
+        updateProgramPageInfo();
+        m_masterStack->setCurrentIndex(4);
+    });
+
     // 全屏叠加层
     m_masterStack = new QStackedWidget;
     m_masterStack->addWidget(ui->centralwidget);   // 0 = 正常布局
     m_masterStack->addWidget(m_libraryPage);       // 1 = 全屏灯库
     m_masterStack->addWidget(m_addressPage);       // 2 = 域管理
+    m_masterStack->addWidget(stagePage);           // 3 = 舞台选择
+    m_masterStack->addWidget(m_programPage);       // 4 = 编程编辑
     setCentralWidget(m_masterStack);
     connect(m_libraryPage, &LibraryPage::goBackRequested, this, [this]() { m_masterStack->setCurrentIndex(0); });
     connect(m_libraryPage, &LibraryPage::libraryUpdated, this, [this](const QList<FixtureDef> &lib) {
@@ -138,6 +174,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->rootLayout->insertWidget(idx, m_rightStack);
 
     connect(m_addressPage, &AddressPage::backRequested, this, [this]() { m_masterStack->setCurrentIndex(0); });
+    connect(m_programPage, &ProgramPage::backRequested, this, [this]() { m_masterStack->setCurrentIndex(0); });
     // 地址页：新建域
     connect(m_addressPage, &AddressPage::newDomainRequested, this, [this](const QString &model, int ch) {
         while (m_universes.size() <= m_addressPage->curDomain())
@@ -170,6 +207,10 @@ MainWindow::MainWindow(QWidget *parent)
         });
         ui->menubar->insertAction(ui->menuProgram->menuAction(), actAddr);
     }
+    // 菜单"编程" → 先进入舞台选择页
+    connect(ui->menuProgram, &QMenu::aboutToShow, this, [this]() {
+        m_masterStack->setCurrentIndex(3);
+    });
 
     // ===== 域1（必须在 m_addressPage 之后）=====
     m_universes << new Universe(0, this);
@@ -213,8 +254,62 @@ MainWindow::MainWindow(QWidget *parent)
         }
     });
 
+    // 时间线播放控制栏
+    auto *tlBar = new QWidget;
+    tlBar->setFixedHeight(30);
+    tlBar->setStyleSheet("background:#e8e8e8; border-bottom:1px solid #ccc;");
+    auto *tlBarL = new QHBoxLayout(tlBar);
+    tlBarL->setContentsMargins(6, 2, 6, 2);
+    tlBarL->setSpacing(2);
+
+    auto makeTlBtn = [](QStyle::StandardPixmap icon, const QString &tip) {
+        auto *b = new QPushButton;
+        b->setFixedSize(32, 24);
+        b->setToolTip(tip);
+        b->setIcon(QApplication::style()->standardIcon(icon));
+        b->setIconSize(QSize(16, 16));
+        b->setStyleSheet(
+            "QPushButton { background:#ddd; border:1px solid #bbb; border-radius:3px; }"
+            "QPushButton:hover { background:#e0e0e0; border-color:#99b; }");
+        return b;
+    };
+    auto setIcon = [](QPushButton *b, QStyle::StandardPixmap icon) {
+        b->setIcon(QApplication::style()->standardIcon(icon));
+    };
+
+    m_prevBtn  = makeTlBtn(QStyle::SP_MediaSeekBackward, "上一帧");
+    m_playBtn  = makeTlBtn(QStyle::SP_MediaPlay,        "播放");
+    m_stopBtn  = makeTlBtn(QStyle::SP_MediaStop,         "停止");
+    m_nextBtn  = makeTlBtn(QStyle::SP_MediaSeekForward,  "下一帧");
+
+    connect(m_prevBtn, &QPushButton::clicked, this, [this]() {
+        if (m_timeline) { m_timeline->stepPrev(); m_timelinePlaying = false; syncPlayBtn(); }
+    });
+    connect(m_playBtn, &QPushButton::clicked, this, [this]() {
+        if (!m_timeline) return;
+        if (m_timelinePlaying) { m_timeline->pause(); m_timelinePlaying = false; }
+        else                   { m_timeline->play();  m_timelinePlaying = true;  }
+        syncPlayBtn();
+    });
+    connect(m_stopBtn, &QPushButton::clicked, this, [this]() {
+        if (m_timeline) { m_timeline->pause(); m_timeline->resetPlayhead(); }
+        m_timelinePlaying = false;
+        syncPlayBtn();
+    });
+    connect(m_nextBtn, &QPushButton::clicked, this, [this]() {
+        if (m_timeline) { m_timeline->stepNext(); m_timelinePlaying = false; syncPlayBtn(); }
+    });
+
+    tlBarL->addStretch();
+    tlBarL->addWidget(m_prevBtn);
+    tlBarL->addWidget(m_playBtn);
+    tlBarL->addWidget(m_stopBtn);
+    tlBarL->addWidget(m_nextBtn);
+    tlBarL->addStretch();
+
     // 替换占位时间线
     m_timeline = new Timeline;
+    ui->timelineLayout->addWidget(tlBar);
     ui->timelineLayout->addWidget(m_timeline);
     ui->timelinePlaceholder->hide();
     ui->timelineHeader->hide();
@@ -240,9 +335,18 @@ MainWindow::MainWindow(QWidget *parent)
         }
         if (!targetFx) return;
 
+        bool hasBinding = m_stageMap.contains(targetFx);
         QMenu menu;
         QAction *addAction = menu.addAction("添加到时间线");
         QAction *switchAction = menu.addAction("切换域");
+        QAction *progAction = menu.addAction("添加编程");
+        QAction *editBindAction = nullptr;
+        QAction *removeBindAction = nullptr;
+        if (hasBinding) {
+            menu.addSeparator();
+            editBindAction = menu.addAction("修改绑定");
+            removeBindAction = menu.addAction("移除绑定");
+        }
         QAction *chosen = menu.exec(ui->fixtureList->mapToGlobal(pos));
         if (chosen == addAction && m_timeline) {
             QString name = item->text();
@@ -295,6 +399,142 @@ MainWindow::MainWindow(QWidget *parent)
                     }
                 }
             }
+        } else if (chosen == progAction && m_stageLayout) {
+            QDialog dlg(this);
+            dlg.setWindowTitle("添加编程 — " + targetFx->name());
+            dlg.setFixedSize(300, 160);
+            dlg.setStyleSheet("background:#fff");
+            auto *pl = new QVBoxLayout(&dlg);
+            pl->setSpacing(10);
+            pl->setContentsMargins(16, 16, 16, 16);
+
+            auto *row1 = new QHBoxLayout;
+            row1->addWidget(new QLabel("添加为："));
+            auto *typeCombo = new QComboBox(&dlg);
+            typeCombo->setMinimumWidth(140);
+            typeCombo->addItems({"面光", "逆光", "侧光", "顶光"});
+            row1->addWidget(typeCombo);
+            row1->addStretch();
+            pl->addLayout(row1);
+
+            auto *row2 = new QHBoxLayout;
+            row2->addWidget(new QLabel("编号："));
+            auto *numCombo = new QComboBox(&dlg);
+            numCombo->setMinimumWidth(140);
+            row2->addWidget(numCombo);
+            row2->addStretch();
+            pl->addLayout(row2);
+
+            auto refreshNumbers = [&]() {
+                QString group = typeCombo->currentText();
+                numCombo->clear();
+                int maxN = m_stageLayout->maxNumber(group);
+                for (int n = 1; n <= maxN; n++) {
+                    QString fullName = group + QString::number(n);
+                    bool occ = m_stageLayout->isOccupied(fullName);
+                    numCombo->addItem(occ ? QString::number(n) + "（占用）" : QString::number(n), fullName);
+                }
+            };
+            refreshNumbers();
+            connect(typeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                    &dlg, refreshNumbers);
+
+            pl->addStretch();
+            auto *btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+            connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+            connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+            pl->addWidget(btns);
+
+            if (dlg.exec() == QDialog::Accepted && numCombo->count() > 0) {
+                QString posName = numCombo->currentData().toString();
+                bool doAssign = true;
+                if (m_stageLayout->isOccupied(posName)) {
+                    auto answer = QMessageBox::question(&dlg, "覆盖确认",
+                        posName + " 已被占用，是否覆盖？",
+                        QMessageBox::Yes | QMessageBox::No);
+                    doAssign = (answer == QMessageBox::Yes);
+                }
+                if (doAssign) {
+                    if (m_stageMap.contains(targetFx))
+                        m_stageLayout->unassignPosition(m_stageMap[targetFx]);
+                    m_stageLayout->assignPosition(posName);
+                    m_stageMap[targetFx] = posName;
+                }
+            }
+        } else if (editBindAction && chosen == editBindAction && m_stageLayout) {
+            // 修改绑定：打开相同对话框，预选当前绑定
+            QString curName = m_stageMap.value(targetFx);
+            QString curGroup;
+            int curNum = 0;
+            for (const auto &g : QStringList{"面光", "逆光", "侧光", "顶光"}) {
+                if (curName.startsWith(g)) { curGroup = g; curNum = curName.mid(g.length()).toInt(); break; }
+            }
+
+            QDialog dlg(this);
+            dlg.setWindowTitle("修改绑定 — " + targetFx->name());
+            dlg.setFixedSize(300, 160);
+            dlg.setStyleSheet("background:#fff");
+            auto *pl = new QVBoxLayout(&dlg);
+            pl->setSpacing(10); pl->setContentsMargins(16, 16, 16, 16);
+
+            auto *row1 = new QHBoxLayout;
+            row1->addWidget(new QLabel("添加为："));
+            auto *typeCombo = new QComboBox(&dlg);
+            typeCombo->setMinimumWidth(140);
+            typeCombo->addItems({"面光", "逆光", "侧光", "顶光"});
+            if (!curGroup.isEmpty()) typeCombo->setCurrentText(curGroup);
+            row1->addWidget(typeCombo); row1->addStretch();
+            pl->addLayout(row1);
+
+            auto *row2 = new QHBoxLayout;
+            row2->addWidget(new QLabel("编号："));
+            auto *numCombo = new QComboBox(&dlg);
+            numCombo->setMinimumWidth(140);
+            row2->addWidget(numCombo); row2->addStretch();
+            pl->addLayout(row2);
+
+            auto refreshNumbers = [&]() {
+                QString group = typeCombo->currentText();
+                numCombo->clear();
+                int selIdx = 0, i = 0;
+                for (int n = 1; n <= m_stageLayout->maxNumber(group); n++) {
+                    QString fn = group + QString::number(n);
+                    bool occ = m_stageLayout->isOccupied(fn);
+                    numCombo->addItem(occ ? QString::number(n) + "（占用）" : QString::number(n), fn);
+                    if (fn == curName) selIdx = i;
+                    i++;
+                }
+                if (selIdx < numCombo->count()) numCombo->setCurrentIndex(selIdx);
+            };
+            refreshNumbers();
+            connect(typeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dlg, refreshNumbers);
+
+            pl->addStretch();
+            auto *btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+            connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+            connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+            pl->addWidget(btns);
+
+            if (dlg.exec() == QDialog::Accepted && numCombo->count() > 0) {
+                QString posName = numCombo->currentData().toString();
+                if (posName != curName && m_stageLayout->isOccupied(posName)) {
+                    if (QMessageBox::question(&dlg, "覆盖确认",
+                            posName + " 已被占用，是否覆盖？",
+                            QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+                        return; // stay in lambda, skip assign
+                }
+                m_stageLayout->unassignPosition(curName);
+                m_stageLayout->assignPosition(posName);
+                m_stageMap[targetFx] = posName;
+            }
+        } else if (removeBindAction && chosen == removeBindAction && m_stageLayout) {
+            QString curName = m_stageMap.value(targetFx);
+            if (QMessageBox::question(this, "移除绑定",
+                    "确认移除 " + targetFx->name() + " 的舞台绑定「" + curName + "」？",
+                    QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+                m_stageLayout->unassignPosition(curName);
+                m_stageMap.remove(targetFx);
+            }
         }
     });
 
@@ -304,6 +544,17 @@ MainWindow::MainWindow(QWidget *parent)
 
     // 默认显示灯库模式
     ui->leftStack->setCurrentIndex(0);
+}
+
+void MainWindow::syncPlayBtn()
+{
+    if (m_timelinePlaying) {
+        m_playBtn->setIcon(QApplication::style()->standardIcon(QStyle::SP_MediaPause));
+        m_playBtn->setToolTip("暂停");
+    } else {
+        m_playBtn->setIcon(QApplication::style()->standardIcon(QStyle::SP_MediaPlay));
+        m_playBtn->setToolTip("播放");
+    }
 }
 
 MainWindow::~MainWindow()
@@ -350,6 +601,18 @@ Universe *MainWindow::currentUniverse() const
     return m_universes.value(m_currentDomain, nullptr);
 }
 
+void MainWindow::updateProgramPageInfo()
+{
+    if (!m_programPage) return;
+    Universe *u = currentUniverse();
+    int sel = m_stageLayout ? m_stageLayout->selectedCount() : 0;
+    m_programPage->setProgramInfo(
+        QString("域 %1").arg(m_currentDomain + 1),
+        u ? 512 : 0,
+        sel > 0 ? sel : (u ? u->fixtures().size() : 0));
+    m_programPage->setArtNetStatus(m_artnet != nullptr || m_dmxDevice != nullptr);
+}
+
 void MainWindow::switchDomain(int domainIndex)
 {
     if (domainIndex < 0) return;
@@ -386,6 +649,7 @@ void MainWindow::switchDomain(int domainIndex)
     QList<Fixture *> allFx;
     for (auto *uv : m_universes) allFx << uv->fixtures();
     m_addressPage->updateFixtures(allFx);
+    updateProgramPageInfo();
 }
 
 // =====================================================================
@@ -524,6 +788,10 @@ void MainWindow::removeFixture(Fixture *f)
         delete fitm;
     }
     m_globe3D->removeFixture(f);
+    if (m_stageMap.contains(f)) {
+        if (m_stageLayout) m_stageLayout->unassignPosition(m_stageMap[f]);
+        m_stageMap.remove(f);
+    }
     bool wasSelected = (m_selected == f);
     if (wasSelected) m_selected = nullptr;
     delete f;
@@ -731,6 +999,7 @@ void MainWindow::on_connectButton_clicked()
         if (m_artnet) delete m_artnet;
         m_artnet = new ArtNetSender(ip, this);
         ui->statusLabel->setText("已连接 - Art-Net → " + ip);
+        if (m_programPage) { m_programPage->setArtNetStatus(true); updateProgramPageInfo(); }
     } else {
         QList<DMXUSBWidget *> devs = DMXUSBWidget::widgets();
         if (devs.isEmpty()) { QMessageBox::warning(this, "错误", "未检测到 USB DMX 设备！"); return; }
@@ -738,6 +1007,7 @@ void MainWindow::on_connectButton_clicked()
         m_dmxDevice->open(0, false);
         m_dmxDevice->setOutputFrequency(44);
         ui->statusLabel->setText("已连接 - USB DMX");
+        if (m_programPage) { m_programPage->setArtNetStatus(true); updateProgramPageInfo(); }
     }
 }
 
@@ -802,6 +1072,12 @@ void MainWindow::closeEvent(QCloseEvent *event)
 {
     if (m_libraryPage && m_libraryPage->isDirty()) {
         if (!m_libraryPage->maybeSave()) {
+            event->ignore();
+            return;
+        }
+    }
+    if (m_programPage && m_programPage->isDirty()) {
+        if (!m_programPage->maybeSave()) {
             event->ignore();
             return;
         }

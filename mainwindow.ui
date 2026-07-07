@@ -14,7 +14,7 @@
    </widget>
    <widget class="QMenu" name="menuFixture"><property name="title"><string>灯库</string></property></widget>
    <widget class="QMenu" name="menuAddress"><property name="title"><string>地址码</string></property></widget>
-   <widget class="QMenu" name="menuProgram"><property name="title"><string>程序</string></property></widget>
+   <widget class="QMenu" name="menuProgram"><property name="title"><string>编程</string></property></widget>
    <widget class="QMenu" name="menuWindow"><property name="title"><string>窗口</string></property></widget>
    <widget class="QMenu" name="menuTimeline"><property name="title"><string>时间线</string></property></widget>
    <addaction name="menuFile"/><addaction name="menuFixture"/>

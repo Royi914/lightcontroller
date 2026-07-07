@@ -8,6 +8,7 @@
 #include <QMap>
 
 #include "Fixture.h"
+#include "stagelayout.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -84,6 +85,7 @@ private:
     void rebuildControlPanel(Fixture *f);
     void refreshLibraryPage();
     Universe *currentUniverse() const;
+    void updateProgramPageInfo();
 
     Ui::MainWindow       *ui;
     QGraphicsScene       *m_scene       = nullptr;
@@ -91,7 +93,15 @@ private:
     QStackedWidget       *m_viewStack   = nullptr;
     AddressPage          *m_addressPage = nullptr;
     LibraryPage          *m_libraryPage = nullptr;
+    class ProgramPage    *m_programPage = nullptr;
     Globe3D              *m_globe3D     = nullptr;
+    StageLayout          *m_stageLayout = nullptr;
+    QPushButton          *m_prevBtn     = nullptr;
+    QPushButton          *m_playBtn     = nullptr;
+    QPushButton          *m_stopBtn     = nullptr;
+    QPushButton          *m_nextBtn     = nullptr;
+    bool                  m_timelinePlaying = false;
+    void syncPlayBtn();
     QPushButton          *m_btn2D       = nullptr;
     QPushButton          *m_btn3D       = nullptr;
     QPushButton          *m_colorBtn    = nullptr;
@@ -106,6 +116,7 @@ private:
     Fixture              *m_selected     = nullptr;
     QList<FixtureDef>     m_library;
     QMap<Fixture *, FixtureItem *> m_fixtureItems;
+    QMap<Fixture *, QString> m_stageMap;  // fixture → stage position name
 
     bool                  m_useArtnet    = true;
     bool                  m_syncOnly     = false;

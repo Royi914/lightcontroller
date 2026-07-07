@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+       cmake_minimum_required(VERSION 3.16)
 project(LightController VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -67,12 +67,14 @@ add_executable(LightController
     fixturedialog.h
     addresspage.h
     librarypage.h
+    programpage.h
     domainpage.h
     globe3d.h
     globe3d.cpp
     colorwheel.h
     beamwidget.h
     timeline.h
+    stagelayout.h
 )
 
 target_include_directories(LightController PRIVATE
