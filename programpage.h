@@ -204,7 +204,7 @@ public:
                 QAction *chosen = menu.exec(m_blocks[i]->mapToGlobal(pos));
                 if (chosen == renameAct) {
                     bool ok;
-                    QString newName = QInputDialog::getText(this, "重命名模板", "模板名称:",
+                    QString newName = QInputDialog::getText(this, "重命名模板", "模板名称：",
                                                              QLineEdit::Normal, m_templateNames[i], &ok);
                     if (ok && !newName.isEmpty()) {
                         m_templateNames[i] = newName;
@@ -231,7 +231,7 @@ public:
         connect(addBtn, &QPushButton::clicked, this, [this]() {
             bool ok;
             QString defName = QString("模板%1").arg(m_templateCount + 1);
-            QString name = QInputDialog::getText(this, "新建模板", "模板名称:",
+            QString name = QInputDialog::getText(this, "新建模板", "模板名称：",
                                                   QLineEdit::Normal, defName, &ok);
             if (!ok || name.isEmpty()) return;
             TemplateData td;

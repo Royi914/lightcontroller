@@ -20,8 +20,9 @@
 #include <QByteArray>
 
 #include "ArtNetCommon.h"
+#include "lightprotocol_global.h"
 
-class ArtNetReceiver : public QObject
+class LIGHTPROTOCOL_EXPORT ArtNetReceiver : public QObject
 {
     Q_OBJECT
 

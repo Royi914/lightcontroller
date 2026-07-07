@@ -110,6 +110,7 @@ private:
     class Timeline       *m_timeline    = nullptr;
     ArtNetSender         *m_artnet      = nullptr;
     DMXUSBWidget         *m_dmxDevice   = nullptr;
+    bool                  m_connected   = false;
 
     QList<Universe *>     m_universes;         // 域1, 域2, ...
     int                   m_currentDomain = 0;

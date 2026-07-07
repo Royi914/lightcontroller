@@ -34,7 +34,9 @@
  * This is the base interface class for all the USB DMX widgets.
  * It represents a DMX USB widget, with all its specific input/output lines
  */
-class DMXUSBWidget
+#include "lightprotocol_global.h"
+
+class LIGHTPROTOCOL_EXPORT DMXUSBWidget
 {
 public:
     /**

@@ -28,7 +28,9 @@
 #define SETTINGS_FREQ_MAP "qlcftdi/freqmap"
 #define READ_CHUNK_SIZE 512
 
-class DMXInterface
+#include "lightprotocol_global.h"
+
+class LIGHTPROTOCOL_EXPORT DMXInterface
 {
     /************************************************************************
      * Construction & Generic Information

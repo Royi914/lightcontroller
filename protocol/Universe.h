@@ -15,9 +15,11 @@
 #include "ArtNetCommon.h"
 
 class Fixture;
+#include "lightprotocol_global.h"
+
 class ArtNetSender;
 
-class Universe : public QObject
+class LIGHTPROTOCOL_EXPORT Universe : public QObject
 {
     Q_OBJECT
 

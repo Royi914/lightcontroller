@@ -95,9 +95,27 @@ public:
         tbLayout->addWidget(backBtn);
         outerRoot->addWidget(toolbar);
 
+        // === 右侧区域 ===
+        auto *rightPanel = new QWidget;
+        auto *rightLayout = new QVBoxLayout(rightPanel);
+        rightLayout->setContentsMargins(0, 0, 0, 0);
+        rightLayout->setSpacing(0);
+
+        auto *rightTopBar = new QWidget;
+        rightTopBar->setFixedHeight(28);
+        rightTopBar->setStyleSheet("background:#f8f8f8; border-bottom:1px solid #e0e0e0;");
+        auto *rtbLayout = new QHBoxLayout(rightTopBar);
+        rtbLayout->setContentsMargins(12, 2, 12, 2);
+        rtbLayout->addStretch();
+        m_artnetStatus = new QLabel("○ ArtNet 未连接");
+        m_artnetStatus->setStyleSheet("color:#999; font-size:11px; font-weight:bold; border:none;");
+        rtbLayout->addWidget(m_artnetStatus);
+        rightLayout->addWidget(rightTopBar);
+
         // === 右侧 QStackedWidget ===
         m_stack = new QStackedWidget;
-        outerRoot->addWidget(m_stack, 1);
+        rightLayout->addWidget(m_stack, 1);
+        outerRoot->addWidget(rightPanel, 1);
         buildListView();
         buildDetailView();
     }
@@ -105,6 +123,17 @@ public:
     void setLibrary(const QList<FixtureDef> &library) { m_library = library; refreshListView(); }
     QList<FixtureDef> library() const { return m_library; }
     bool isDirty() const { return m_dirty; }
+
+    void setArtNetStatus(bool connected)
+    {
+        if (connected) {
+            m_artnetStatus->setText("● ArtNet 已连接");
+            m_artnetStatus->setStyleSheet("color:#2a2; font-size:11px; font-weight:bold; border:none;");
+        } else {
+            m_artnetStatus->setText("○ ArtNet 未连接");
+            m_artnetStatus->setStyleSheet("color:#999; font-size:11px; font-weight:bold; border:none;");
+        }
+    }
 
     /// Returns true if it's safe to navigate away (saved / ignored / not dirty)
     /// Returns false if user clicked X (stay on current page, keep dirty flag)
@@ -210,7 +239,7 @@ private slots:
 
     void onSaveAsFile()
     {
-        QString path = QFileDialog::getSaveFileName(this, "另存为", "fixtures.json", "JSON 文件 (*.json)");
+        QString path = QFileDialog::getSaveFileName(this, "另存为", "灯具配置.json", "JSON 文件 (*.json)");
         if (path.isEmpty()) return;
         QJsonArray arr;
         for (const auto &def : m_library) {
@@ -279,6 +308,13 @@ private slots:
             QString t = m_channelEdits[ch]->text();
             m_committedNames[ch] = t.isEmpty() ? QString("通道%1").arg(ch + 1) : t;
         }
+        rebuildDetail();
+    }
+
+    void onModifyChannel(int ch)
+    {
+        if (ch < 0 || ch >= m_detailChannels) return;
+        m_committedFlags[ch] = false;
         rebuildDetail();
     }
 
@@ -415,6 +451,11 @@ private:
                 commitBtn->setStyleSheet("background:#cfc;color:#060;border:1px solid #8b8;border-radius:3px;padding:4px 10px");
                 connect(commitBtn, &QPushButton::clicked, this, [this,i](){ onCommitChannel(i); });
                 hl->addWidget(commitBtn);
+            } else {
+                auto *modifyBtn = new QPushButton("修改");
+                modifyBtn->setStyleSheet("background:#e8e8ff;color:#336;border:1px solid #aac;border-radius:3px;padding:4px 10px");
+                connect(modifyBtn, &QPushButton::clicked, this, [this,i](){ onModifyChannel(i); });
+                hl->addWidget(modifyBtn);
             }
 
             auto *customBtn = new QPushButton("自定义");
@@ -585,6 +626,7 @@ private:
     QStringList m_pendingNames;
     QStackedWidget *m_stack;
     QPushButton *m_listBtn;
+    QLabel *m_artnetStatus = nullptr;
 };
 
 #endif

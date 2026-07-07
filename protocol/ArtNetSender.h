@@ -22,7 +22,9 @@
 
 #include "ArtNetCommon.h"
 
-class ArtNetSender : public QObject
+#include "lightprotocol_global.h"
+
+class LIGHTPROTOCOL_EXPORT ArtNetSender : public QObject
 {
     Q_OBJECT
 

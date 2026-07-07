@@ -150,7 +150,7 @@ private slots:
     }
     void onSave() {
         if (m_cur < 0 || m_cur >= m_doms.size()) return;
-        QString path = QFileDialog::getSaveFileName(this, "保存域文件", "domains.json", "JSON (*.json)");
+        QString path = QFileDialog::getSaveFileName(this, "保存域文件", "域配置.json", "JSON (*.json)");
         if (path.isEmpty()) return;
         QJsonArray arr;
         for (auto &d : m_doms)

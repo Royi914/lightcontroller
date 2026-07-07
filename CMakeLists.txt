@@ -14,7 +14,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBFTDI1 REQUIRED IMPORTED_TARGET libftdi1 libusb-1.0)
 
 # ========== Protocol 库 ==========
-add_library(lightprotocol STATIC
+add_library(lightprotocol SHARED
+    protocol/lightprotocol_global.h
     # Art-Net
     protocol/ArtNetSender.h
     protocol/ArtNetSender.cpp
@@ -44,7 +45,8 @@ target_include_directories(lightprotocol PUBLIC
     ${LIBFTDI1_INCLUDE_DIRS}
 )
 
-target_compile_definitions(lightprotocol PUBLIC
+target_compile_definitions(lightprotocol PRIVATE
+    LIGHTPROTOCOL_LIBRARY
     LIBFTDI1
 )
 
@@ -79,7 +81,10 @@ add_executable(LightController
 
 target_include_directories(LightController PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LIBFTDI1_INCLUDE_DIRS}
 )
+
+target_compile_definitions(LightController PRIVATE LIBFTDI1)
 
 target_link_libraries(LightController PRIVATE
     lightprotocol

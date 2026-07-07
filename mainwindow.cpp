@@ -403,7 +403,7 @@ MainWindow::MainWindow(QWidget *parent)
             while (m_universes.size() < doms.size())
                 m_universes << new Universe(m_universes.size(), this);
             for (int di = 0; di < doms.size(); di++) {
-                QString label = QString("域 %1 — %2 (%3ch)")
+                QString label = QString("域 %1 — %2（%3通道）")
                     .arg(di + 1).arg(doms[di].model).arg(doms[di].channels);
                 combo->addItem(label, di);
             }
@@ -652,7 +652,7 @@ void MainWindow::updateProgramPageInfo()
         QString("域 %1").arg(m_currentDomain + 1),
         u ? 512 : 0,
         sel > 0 ? sel : (u ? u->fixtures().size() : 0));
-    m_programPage->setArtNetStatus(m_artnet != nullptr || m_dmxDevice != nullptr);
+    m_programPage->setArtNetStatus(m_connected);
 }
 
 void MainWindow::switchDomain(int domainIndex)
@@ -1040,16 +1040,20 @@ void MainWindow::on_connectButton_clicked()
         QString ip = ui->artnetIpEdit->text();
         if (m_artnet) delete m_artnet;
         m_artnet = new ArtNetSender(ip, this);
+        m_connected = true;
         ui->statusLabel->setText("已连接 - Art-Net → " + ip);
         if (m_programPage) { m_programPage->setArtNetStatus(true); updateProgramPageInfo(); }
+        if (m_libraryPage) m_libraryPage->setArtNetStatus(true);
     } else {
         QList<DMXUSBWidget *> devs = DMXUSBWidget::widgets();
         if (devs.isEmpty()) { QMessageBox::warning(this, "错误", "未检测到 USB DMX 设备！"); return; }
         m_dmxDevice = devs.first();
         m_dmxDevice->open(0, false);
         m_dmxDevice->setOutputFrequency(44);
+        m_connected = true;
         ui->statusLabel->setText("已连接 - USB DMX");
         if (m_programPage) { m_programPage->setArtNetStatus(true); updateProgramPageInfo(); }
+        if (m_libraryPage) m_libraryPage->setArtNetStatus(true);
     }
 }
 

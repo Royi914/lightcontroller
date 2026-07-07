@@ -39,8 +39,10 @@ struct FixtureDef
         : name(n), manufacturer(mfr), channels(ch), channelNames(cn) {}
 };
 
+#include "lightprotocol_global.h"
+
 // ===== 灯具实例（你添加的每一台灯） =====
-class Fixture : public QObject
+class LIGHTPROTOCOL_EXPORT Fixture : public QObject
 {
     Q_OBJECT
 
