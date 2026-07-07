@@ -81,6 +81,14 @@ public:
 
     bool isOccupied(const QString &name) const { return m_occupied.contains(name); }
 
+    void setPositionLabel(const QString &name, const QString &label)
+    {
+        m_labels[name] = label;
+        update();
+    }
+
+    QString positionLabel(const QString &name) const { return m_labels.value(name); }
+
     int maxNumber(const QString &group) const
     {
         int n = 0;
@@ -153,11 +161,21 @@ protected:
             p.setBrush(Qt::NoBrush);
             p.drawRoundedRect(r, 3, 3);
 
-            // Occupied dot
+            // Occupied dot + label
             if (occ && !sel) {
                 p.setPen(Qt::NoPen);
                 p.setBrush(QColor(0x4a, 0xaa, 0x4a));
-                p.drawEllipse(QPointF(r.right() - 8, r.top() + 8), 4, 4);
+                p.drawEllipse(QPointF(r.right() - 7, r.top() + 7), 3, 3);
+            }
+            if (occ) {
+                QString lbl = m_labels.value(pos.name);
+                if (!lbl.isEmpty()) {
+                    QFont lf = font();
+                    lf.setPixelSize(9);
+                    p.setFont(lf);
+                    p.setPen(QColor(0x33, 0x77, 0x33));
+                    p.drawText(r.adjusted(3, 1, -3, 0), Qt::AlignLeft | Qt::AlignTop, lbl);
+                }
             }
 
             p.setPen(sel ? QColor(0xff, 0xff, 0xff) : QColor(0x33, 0x33, 0x33));
@@ -296,6 +314,7 @@ private:
     QVector<StagePos> m_positions;
     QSet<int> m_selected;
     QSet<QString> m_occupied;
+    QMap<QString, QString> m_labels;
     QPushButton *m_enterBtn = nullptr;
 };
 

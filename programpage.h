@@ -17,6 +17,7 @@
 #include <QMessageBox>
 #include <QMenu>
 #include <QInputDialog>
+#include <QTimer>
 
 // Per-template stored values
 struct TemplateData {
@@ -27,6 +28,7 @@ struct TemplateData {
     QString activeColor;
 };
 
+class StageLayout;
 class ProgramPage : public QWidget
 {
     Q_OBJECT
@@ -69,8 +71,28 @@ public:
         };
         makeBtn("新建");
         makeBtn("打开");
-        makeBtn("保存");
+        auto *saveBtn = new QPushButton("  保存");
+        saveBtn->setFixedHeight(36);
+        saveBtn->setStyleSheet("background:#f5f5f5;color:#222;border:1px solid #ccc;border-radius:4px;text-align:left;padding-left:12px");
+        connect(saveBtn, &QPushButton::clicked, this, [this]() { onSave(); });
+        tbl->addWidget(saveBtn);
         makeBtn("另存为");
+
+        // 组名编辑
+        auto *grpRow = new QHBoxLayout;
+        grpRow->setSpacing(4);
+        auto *grpLbl = new QLabel("组名");
+        grpLbl->setStyleSheet("color:#555;font-size:11px;border:none;");
+        grpRow->addWidget(grpLbl);
+        m_groupEdit = new QLineEdit("组1");
+        m_groupEdit->setMaxLength(12);
+        m_groupEdit->setStyleSheet("color:#222;border:1px solid #bbb;border-radius:2px;padding:2px 4px;font-size:11px;");
+        m_groupEdit->setFixedWidth(60);
+        connect(m_groupEdit, &QLineEdit::textChanged, this, [this]() { m_dirty = true; });
+        grpRow->addWidget(m_groupEdit);
+        grpRow->addStretch();
+        tbl->addLayout(grpRow);
+
         tbl->addStretch();
 
         // Play / Stop at bottom of toolbar
@@ -95,6 +117,14 @@ public:
             // TODO: stop playback
         });
         tbl->addWidget(stopBtn);
+
+        auto *backStageBtn = new QPushButton("  返回舞台视图");
+        backStageBtn->setFixedHeight(36);
+        backStageBtn->setStyleSheet("background:#e8e0d0;color:#333;border:1px solid #ccb;border-radius:4px;text-align:left;padding-left:12px");
+        connect(backStageBtn, &QPushButton::clicked, this, [this]() {
+            if (maybeSave()) emit backToStageRequested();
+        });
+        tbl->addWidget(backStageBtn);
 
         auto *bk = new QPushButton("  返回主界面");
         bk->setFixedHeight(36);
@@ -279,14 +309,27 @@ public:
     {
         m_savedTemplateData = m_templateData;
         m_savedTemplateNames = m_templateNames;
-        // TODO: persist template data to file
         m_dirty = false;
+        if (m_stageLayout) {
+            QString gName = groupName();
+            for (auto &n : m_boundPositions)
+                m_stageLayout->setPositionLabel(n, gName);
+        }
+        emit saved(groupName(), m_boundPositions);
+        m_infoName->setText(m_infoName->text() + "  ✓已保存");
+        QTimer::singleShot(2000, this, [this]() {
+            updateInfoDisplay();
+        });
     }
+
+    void setBoundPositions(const QStringList &positions) { m_boundPositions = positions; }
+    void setStageLayout(StageLayout *sl) { m_stageLayout = sl; }
 
     void setProgramInfo(const QString &name, int channels, int fixtureCount)
     {
-        m_infoName->setText("名称：" + name);
-        m_infoChannels->setText("通道：" + QString::number(channels));
+        Q_UNUSED(name);
+        Q_UNUSED(channels);
+        updateInfoDisplay();
         m_infoFixtures->setText("灯具数量：" + QString::number(fixtureCount));
     }
 
@@ -301,8 +344,30 @@ public:
         }
     }
 
+    void setFixtureInfo(const QString &model, int channels)
+    {
+        m_fixtureModel = model;
+        m_fixtureChannels = channels;
+        updateInfoDisplay();
+    }
+
+    QString groupName() const { return m_groupEdit ? m_groupEdit->text() : "组1"; }
+
+    void updateInfoDisplay()
+    {
+        bool hasFixture = !m_fixtureModel.isEmpty() && m_fixtureChannels > 0;
+        m_infoName->setVisible(hasFixture);
+        m_infoChannels->setVisible(hasFixture);
+        if (hasFixture) {
+            m_infoName->setText("名称：" + m_fixtureModel + " " + groupName());
+            m_infoChannels->setText("通道：" + QString::number(m_fixtureChannels));
+        }
+    }
+
 signals:
     void backRequested();
+    void backToStageRequested();
+    void saved(const QString &groupName, const QStringList &positions);
 
 private:
     void openTemplate(int pageBlockIndex)
@@ -689,6 +754,11 @@ private:
     QLabel *m_infoChannels = nullptr;
     QLabel *m_infoFixtures = nullptr;
     QLabel *m_artnetStatus = nullptr;
+    QLineEdit *m_groupEdit = nullptr;
+    QString m_fixtureModel;
+    int m_fixtureChannels = 0;
+    QStringList m_boundPositions;
+    StageLayout *m_stageLayout = nullptr;
 };
 
 #endif // PROGRAMPAGE_H

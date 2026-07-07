@@ -609,6 +609,7 @@ private:
     QElapsedTimer      m_playClock;
     qreal              m_playStartX = TRACK_LABEL_W;
     qreal              m_playPos    = TRACK_LABEL_W;
+    bool               m_draggingPlayhead = false;
     static constexpr qreal PLAY_SPEED = PX_PER_SEC; // 1s per second
 };
 
@@ -855,8 +856,11 @@ inline void Timeline::stepPrev()
     pause();
     m_playPos = qMax(qreal(TRACK_LABEL_W), m_playPos - PX_PER_SEC);
     updatePlayheadLine();
-    if (auto *sb = m_trackView->horizontalScrollBar())
-        sb->setValue(qMax(0, int(m_playPos - 100)));
+    if (auto *sb = m_trackView->horizontalScrollBar()) {
+        qreal vw = m_trackView->viewport()->width();
+        if (m_playPos < sb->value() + 20 || m_playPos > sb->value() + vw - 20)
+            sb->setValue(qMax(0, int(m_playPos - vw * 0.3)));
+    }
 }
 
 inline void Timeline::stepNext()
@@ -864,8 +868,11 @@ inline void Timeline::stepNext()
     pause();
     m_playPos += PX_PER_SEC;
     updatePlayheadLine();
-    if (auto *sb = m_trackView->horizontalScrollBar())
-        sb->setValue(int(m_playPos - 100));
+    if (auto *sb = m_trackView->horizontalScrollBar()) {
+        qreal vw = m_trackView->viewport()->width();
+        if (m_playPos < sb->value() + 20 || m_playPos > sb->value() + vw - 20)
+            sb->setValue(int(m_playPos - vw * 0.3));
+    }
 }
 
 inline void Timeline::updatePlayheadLine()
@@ -894,12 +901,22 @@ inline bool Timeline::eventFilter(QObject *watched, QEvent *event)
             return true;
         }
     }
-    // Click/drag on ruler or track → seek playhead
+    // Drag playhead: only when clicking near the blue line (within 8px)
     if (watched == m_rulerView->viewport() || watched == m_trackView->viewport()) {
-        if (event->type() == QEvent::MouseButtonPress ||
-            event->type() == QEvent::MouseMove) {
+        if (event->type() == QEvent::MouseButtonPress) {
             QMouseEvent *me = static_cast<QMouseEvent *>(event);
-            if (me->buttons() & Qt::LeftButton) {
+            QGraphicsView *gv = (watched == m_rulerView->viewport())
+                ? static_cast<QGraphicsView *>(m_rulerView)
+                : static_cast<QGraphicsView *>(m_trackView);
+            QPointF scenePt = gv->mapToScene(me->pos());
+            m_draggingPlayhead = (qAbs(scenePt.x() - m_playPos) < 12.0);
+            if (m_draggingPlayhead) {
+                seekTo(qMax(qreal(TRACK_LABEL_W), scenePt.x()));
+                return true;
+            }
+        } else if (event->type() == QEvent::MouseMove) {
+            if (m_draggingPlayhead) {
+                QMouseEvent *me = static_cast<QMouseEvent *>(event);
                 QGraphicsView *gv = (watched == m_rulerView->viewport())
                     ? static_cast<QGraphicsView *>(m_rulerView)
                     : static_cast<QGraphicsView *>(m_trackView);
@@ -907,6 +924,8 @@ inline bool Timeline::eventFilter(QObject *watched, QEvent *event)
                 seekTo(qMax(qreal(TRACK_LABEL_W), scenePt.x()));
                 return true;
             }
+        } else if (event->type() == QEvent::MouseButtonRelease) {
+            m_draggingPlayhead = false;
         }
     }
     return QWidget::eventFilter(watched, event);

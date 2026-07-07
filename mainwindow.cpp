@@ -148,8 +148,40 @@ MainWindow::MainWindow(QWidget *parent)
 
     // Stage "进入编程" → 打开编程编辑页
     connect(m_stageLayout, &StageLayout::enterProgramRequested, this, [this]() {
+        // Pass fixture info from selected/assigned stage positions
+        QStringList selNames = m_stageLayout->selectedNames();
+        if (selNames.isEmpty()) {
+            for (auto it = m_stageMap.begin(); it != m_stageMap.end(); ++it)
+                selNames << it.value();
+            selNames.removeDuplicates();
+        }
+        if (selNames.isEmpty()) {
+            QMessageBox::information(this, "提示", "请先在舞台视图中选择灯具");
+            return;
+        }
+        m_programPage->setBoundPositions(selNames);
+        m_programPage->setStageLayout(m_stageLayout);
+
+        // Find fixture model from assigned fixtures
+        QString model = "--";
+        int channels = 0;
+        for (auto it = m_stageMap.begin(); it != m_stageMap.end(); ++it) {
+            if (selNames.contains(it.value())) {
+                model = it.key()->name();
+                channels = it.key()->channelCount();
+                break;
+            }
+        }
+        m_programPage->setFixtureInfo(model, channels);
         updateProgramPageInfo();
+        m_stageLayout->clearSelection();  // clear blue highlight, keep green occupied
         m_masterStack->setCurrentIndex(4);
+    });
+
+    // Program page save → update stage labels
+    connect(m_programPage, &ProgramPage::saved, this, [this](const QString &groupName, const QStringList &positions) {
+        for (const auto &pos : positions)
+            m_stageLayout->setPositionLabel(pos, groupName);
     });
 
     // 全屏叠加层
@@ -174,7 +206,9 @@ MainWindow::MainWindow(QWidget *parent)
     ui->rootLayout->insertWidget(idx, m_rightStack);
 
     connect(m_addressPage, &AddressPage::backRequested, this, [this]() { m_masterStack->setCurrentIndex(0); });
+    connect(m_addressPage, &AddressPage::domainSwitched, this, [this](int idx) { switchDomain(idx); });
     connect(m_programPage, &ProgramPage::backRequested, this, [this]() { m_masterStack->setCurrentIndex(0); });
+    connect(m_programPage, &ProgramPage::backToStageRequested, this, [this]() { m_masterStack->setCurrentIndex(3); });
     // 地址页：新建域
     connect(m_addressPage, &AddressPage::newDomainRequested, this, [this](const QString &model, int ch) {
         while (m_universes.size() <= m_addressPage->curDomain())
@@ -208,9 +242,12 @@ MainWindow::MainWindow(QWidget *parent)
         ui->menubar->insertAction(ui->menuProgram->menuAction(), actAddr);
     }
     // 菜单"编程" → 先进入舞台选择页
-    connect(ui->menuProgram, &QMenu::aboutToShow, this, [this]() {
+    ui->menuProgram->menuAction()->setVisible(false);
+    auto *actProg = new QAction("编程", this);
+    connect(actProg, &QAction::triggered, this, [this]() {
         m_masterStack->setCurrentIndex(3);
     });
+    ui->menubar->insertAction(ui->menuWindow->menuAction(), actProg);
 
     // ===== 域1（必须在 m_addressPage 之后）=====
     m_universes << new Universe(0, this);
@@ -362,10 +399,12 @@ MainWindow::MainWindow(QWidget *parent)
             dl->addWidget(new QLabel(QString("将 %1 切换到：").arg(targetFx->name())));
             auto *combo = new QComboBox;
             auto doms = m_addressPage->getDomains();
-            for (int di = 0; di < m_universes.size(); di++) {
-                QString label = QString("域 %1").arg(di + 1);
-                if (di < doms.size())
-                    label += QString(" — %1 (%2ch)").arg(doms[di].model).arg(doms[di].channels);
+            // Ensure universes for all domains
+            while (m_universes.size() < doms.size())
+                m_universes << new Universe(m_universes.size(), this);
+            for (int di = 0; di < doms.size(); di++) {
+                QString label = QString("域 %1 — %2 (%3ch)")
+                    .arg(di + 1).arg(doms[di].model).arg(doms[di].channels);
                 combo->addItem(label, di);
             }
             dl->addWidget(combo);
@@ -375,7 +414,10 @@ MainWindow::MainWindow(QWidget *parent)
             dl->addWidget(btns);
             if (dlg.exec() == QDialog::Accepted) {
                 int targetDi = combo->currentData().toInt();
-                if (targetDi >= 0 && targetDi < m_universes.size()) {
+                if (targetDi >= 0 && targetDi < doms.size()) {
+                    // Ensure universe exists
+                    while (m_universes.size() <= targetDi)
+                        m_universes << new Universe(m_universes.size(), this);
                     Universe *dstUniv = m_universes[targetDi];
                     if (dstUniv && dstUniv != srcUniv) {
                         // Get target domain info

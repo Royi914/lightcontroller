@@ -66,11 +66,11 @@ public:
             b->setStyleSheet("background:#f5f5f5;color:#222;border:1px solid #ccc;border-radius:4px;text-align:left;padding-left:12px");
             QObject::connect(b, &QPushButton::clicked, this, fn); tbl->addWidget(b);
         };
-        makeBtn("新建",   [this](){
+        makeBtn("新建域", [this](){
             AddrDomainDialog d(this);
             if (d.exec() == QDialog::Accepted && !d.model().isEmpty()) {
-                m_doms.clear(); m_cur = 0;
                 m_doms << AddrEntry{d.model(), d.channels(), 0};
+                if (m_doms.size() == 1) m_cur = 0;
                 rebuildList();
                 emit newDomainRequested(d.model(), d.channels());
             }
@@ -129,6 +129,7 @@ signals:
     void goBackRequested();
     void newDomainRequested(const QString &model, int channels);
     void deleteDomainRequested(const QString &model);
+    void domainSwitched(int index);
 
 private slots:
     void onNew() {
@@ -198,11 +199,14 @@ private:
             m_listL->addWidget(r);
         }
         m_listL->addStretch();
+        m_listW->updateGeometry();
+        m_listW->update();
         if (m_cur >= 0 && m_cur < m_doms.size()) showDetail(m_cur); else clearDetail();
     }
 
     void showDetail(int i) {
-        m_cur = i; auto &d = m_doms[i];
+        m_cur = i;
+        auto &d = m_doms[i];
         QLayoutItem *c; while ((c = m_detailL->takeAt(0))) { if (c->widget()) delete c->widget(); delete c; }
         QList<Fixture *> matched; for (auto *f : m_all) if (f->name() == d.model) matched << f;
         auto *h = new QLabel(QString("灯型号：%1   通道：%2   数量：%3").arg(d.model).arg(d.channels).arg(matched.size()));
@@ -231,6 +235,7 @@ private:
                 int i = f->property("di").toInt();
                 if (i >= 0 && i < m_doms.size()) {
                     m_cur = i;
+                    emit domainSwitched(i);
                     m_rebuilding = true;
                     QTimer::singleShot(0, this, [this]() { rebuildList(); m_rebuilding = false; });
                 }
