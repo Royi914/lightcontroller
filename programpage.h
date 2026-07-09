@@ -18,6 +18,9 @@
 #include <QMenu>
 #include <QInputDialog>
 #include <QTimer>
+#include <QCoreApplication>
+#include "colorwheel.h"
+#include "videopreview.h"
 
 // Per-template stored values
 struct TemplateData {
@@ -52,6 +55,17 @@ public:
         m_savedTemplateData = m_templateData;
         m_savedTemplateNames = m_templateNames;
         m_dirty = false; // presets are the baseline, not unsaved changes
+
+        // 防抖定时器：滑块拖动时 30ms 后才请求 DMX 输出，避免网络洪泛
+        m_debounceTimer = new QTimer(this);
+        m_debounceTimer->setSingleShot(true);
+        m_debounceTimer->setInterval(30);
+        connect(m_debounceTimer, &QTimer::timeout, this, [this]() {
+            if (m_currentTemplate >= 0 && m_currentTemplate < m_templateData.size()) {
+                applyTemplateToFixtures(m_currentTemplate);
+                emit dmxOutputRequested();
+            }
+        });
 
         auto *oroot = new QHBoxLayout(this);
         oroot->setContentsMargins(0, 0, 0, 0);
@@ -103,7 +117,8 @@ public:
             "QPushButton { background:#3a8; color:#fff; border:1px solid #297; border-radius:4px; font-size:13px; font-weight:bold; }"
             "QPushButton:hover { background:#4b9; }");
         connect(playBtn, &QPushButton::clicked, this, [this]() {
-            // TODO: start playback
+            if (m_currentTemplate >= 0 && m_currentTemplate < m_templateData.size())
+                emit dmxOutputRequested();
         });
         tbl->addWidget(playBtn);
 
@@ -114,7 +129,9 @@ public:
             "QPushButton { background:#a44; color:#fff; border:1px solid #933; border-radius:4px; font-size:13px; font-weight:bold; }"
             "QPushButton:hover { background:#b55; }");
         connect(stopBtn, &QPushButton::clicked, this, [this]() {
-            // TODO: stop playback
+            // 停止：所有通道归零后请求 DMX 输出
+            for (auto *f : m_fixtures) f->setDimmer(0);
+            emit dmxOutputRequested();
         });
         tbl->addWidget(stopBtn);
 
@@ -274,6 +291,23 @@ public:
 
     bool isDirty() const { return m_dirty; }
 
+    bool eventFilter(QObject *obj, QEvent *event) override
+    {
+        if (obj->property("demoEffect").isValid()) {
+            auto *btn = qobject_cast<QPushButton *>(obj);
+            if (event->type() == QEvent::Enter && btn) {
+                if (!m_videoPopup) m_videoPopup = new VideoPreviewPopup(nullptr);
+                QString effect = obj->property("demoEffect").toString();
+                m_videoPopup->showForEffect(effect, btn);
+                QPoint pt = btn->mapToGlobal(QPoint(30, -220));
+                m_videoPopup->move(pt);
+                // show() 已在 showForEffect 中调用
+                return true;
+            }
+        }
+        return QWidget::eventFilter(obj, event);
+    }
+
     /// Returns true if safe to navigate away; false if user cancelled
     bool maybeSave()
     {
@@ -351,6 +385,42 @@ public:
         updateInfoDisplay();
     }
 
+    void setFixtures(const QList<Fixture *> &fixtures) { m_fixtures = fixtures; }
+    QList<Fixture *> fixtures() const { return m_fixtures; }
+
+    /// 将当前模板的色值写入所有绑定的灯具通道
+    void applyTemplateToFixtures(int tIdx)
+    {
+        if (tIdx < 0 || tIdx >= m_templateData.size() || m_fixtures.isEmpty()) return;
+        const auto &data = m_templateData[tIdx];
+        // 颜色名 → 通道名候选映射
+        static const QMap<QString, QStringList> colorMap = {
+            {"红", {"红","R","red"}}, {"绿", {"绿","G","green"}}, {"蓝", {"蓝","B","blue"}},
+            {"黄", {"黄","amber","yellow"}}, {"品红", {"品红","magenta"}}, {"青", {"青","cyan"}},
+            {"紫", {"紫","purple","violet"}}, {"天蓝", {"天蓝","sky"}}, {"粉", {"粉","pink"}},
+            {"浅绿", {"浅绿","lime"}}, {"浅紫", {"浅紫","lavender"}}, {"浅橙", {"浅橙","浅橙","orange"}},
+            {"深蓝", {"深蓝","navy"}}, {"深绿", {"深绿","forest"}}, {"深紫", {"深紫","violet2"}},
+            {"金", {"金","gold"}},
+        };
+        for (auto *f : m_fixtures) {
+            // 主控 → dimmer
+            int master = data.effectValues.value("主控", 255);
+            f->setDimmer(static_cast<uint8_t>(master));
+            // 颜色映射
+            for (auto it = colorMap.begin(); it != colorMap.end(); ++it) {
+                int val = data.colorValues.value(it.key(), 255);
+                for (const auto &cand : it.value()) {
+                    for (int ch = 0; ch < f->channelCount(); ch++) {
+                        if (f->channelName(ch).toLower().trimmed() == cand.toLower().trimmed()) {
+                            f->setChannel(ch, static_cast<uint8_t>(val));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     QString groupName() const { return m_groupEdit ? m_groupEdit->text() : "组1"; }
 
     void updateInfoDisplay()
@@ -368,6 +438,11 @@ signals:
     void backRequested();
     void backToStageRequested();
     void saved(const QString &groupName, const QStringList &positions);
+    void dmxOutputRequested();  // 模板编辑 → 请求 DMX 输出
+
+public:
+    QStringList boundPositions() const { return m_boundPositions; }
+    int currentTemplateIndex() const { return m_currentTemplate; }
 
 private:
     void openTemplate(int pageBlockIndex)
@@ -459,10 +534,14 @@ private:
             swBtn->setStyleSheet(QString("background:%1;border:1px solid #999;border-radius:2px").arg(swColor.name()));
             connect(swBtn, &QPushButton::clicked, this, [this, tIdx, name, swBtn]() {
                 if (name == "自定义") {
-                    QColor c = QColorDialog::getColor(m_templateData[tIdx].customColor, this, "选择自定义颜色");
-                    if (c.isValid()) {
-                        m_templateData[tIdx].customColor = c;
-                        swBtn->setStyleSheet(QString("background:%1;border:1px solid #999;border-radius:2px").arg(c.name()));
+                    ColorPickerDialog dlg(this);
+                    dlg.setWindowTitle("选择自定义颜色");
+                    if (dlg.exec() == QDialog::Accepted) {
+                        QColor c = dlg.selectedColor();
+                        if (c.isValid()) {
+                            m_templateData[tIdx].customColor = c;
+                            swBtn->setStyleSheet(QString("background:%1;border:1px solid #999;border-radius:2px").arg(c.name()));
+                        }
                     }
                 }
                 m_templateData[tIdx].activeColor = name;
@@ -484,6 +563,7 @@ private:
             connect(sl, &QSlider::valueChanged, val, [val](int v) { val->setText(QString::number(v)); });
             connect(sl, &QSlider::valueChanged, this, [this, tIdx, name](int v) {
                 if (tIdx < m_templateData.size()) { m_templateData[tIdx].colorValues[name] = v; m_dirty = true; }
+                m_debounceTimer->start();
             });
             row->addWidget(sl);
             row->addWidget(val);
@@ -562,6 +642,7 @@ private:
             }
             connect(sl, &QSlider::valueChanged, this, [this, tIdx, name](int v) {
                 if (tIdx < m_templateData.size()) { m_templateData[tIdx].effectValues[name] = v; m_dirty = true; }
+                m_debounceTimer->start();
             });
             row->addWidget(sl);
             row->addWidget(val);
@@ -573,13 +654,22 @@ private:
             demoBtn->setStyleSheet(
                 "QPushButton { color:#999; border:none; background:transparent; font-size:9px; }"
                 "QPushButton:hover { color:#336; background:#e8e8e8; border-radius:3px; }");
-            QString btnLabel = isCustom ? data.effectLabels.value(name, "自定义") : name;
-            demoBtn->setToolTip("点击查看「" + btnLabel + "」效果演示");
-            connect(demoBtn, &QPushButton::clicked, this, [this, name, tIdx]() {
-                // TODO: 弹出对应效果的视频演示
-                QString effectLabel = m_templateData[tIdx].effectLabels.value(name, name);
-                // showEffectDemo(effectLabel);
-            });
+            // 内置效果演示（悬停三角按钮弹出动画预览）
+            static const QSet<QString> demoEffects = {"主渐亮", "主渐暗", "频闪", "换色"};
+            QString effectKey = isCustom ? data.effectLabels.value(name, name) : name;
+            bool hasDemo = demoEffects.contains(effectKey);
+            demoBtn->setToolTip(hasDemo
+                ? "悬停查看「" + effectKey + "」效果演示"
+                : "暂无演示视频");
+            demoBtn->setStyleSheet(hasDemo
+                ? "QPushButton { color:#336; border:none; background:transparent; font-size:9px; font-weight:bold; }"
+                  "QPushButton:hover { color:#558; background:#dde; border-radius:3px; }"
+                : "QPushButton { color:#999; border:none; background:transparent; font-size:9px; }"
+                  "QPushButton:hover { color:#336; background:#e8e8e8; border-radius:3px; }");
+            if (hasDemo) {
+                demoBtn->installEventFilter(this);
+                demoBtn->setProperty("demoEffect", effectKey);
+            }
             row->addWidget(demoBtn);
 
             rightL->addLayout(row);
@@ -599,27 +689,27 @@ private:
 
         if (name == "暖调") {
             d["红"]=255; d["绿"]=60;  d["蓝"]=30; d["黄"]=255; d["品红"]=160; d["青"]=30;
-            d["紫"]=100; d["天蓝"]=30; d["粉"]=220; d["浅绿"]=60; d["浅紫"]=120; d["橙"]=255;
+            d["紫"]=100; d["天蓝"]=30; d["粉"]=220; d["浅绿"]=60; d["浅紫"]=120; d["浅橙"]=255;
             d["深蓝"]=20; d["深绿"]=25; d["深紫"]=80; d["金"]=240;
         } else if (name == "冷调") {
             d["红"]=30;  d["绿"]=70;  d["蓝"]=255; d["黄"]=50; d["品红"]=90;  d["青"]=255;
-            d["紫"]=140; d["天蓝"]=240; d["粉"]=50; d["浅绿"]=160; d["浅紫"]=170; d["橙"]=30;
+            d["紫"]=140; d["天蓝"]=240; d["粉"]=50; d["浅绿"]=160; d["浅紫"]=170; d["浅橙"]=30;
             d["深蓝"]=240; d["深绿"]=50; d["深紫"]=150; d["金"]=40;
         } else if (name == "对比撞色") {
             d["红"]=255; d["绿"]=220; d["蓝"]=255; d["黄"]=220; d["品红"]=255; d["青"]=255;
-            d["紫"]=220; d["天蓝"]=200; d["粉"]=200; d["浅绿"]=200; d["浅紫"]=220; d["橙"]=240;
+            d["紫"]=220; d["天蓝"]=200; d["粉"]=200; d["浅绿"]=200; d["浅紫"]=220; d["浅橙"]=240;
             d["深蓝"]=220; d["深绿"]=200; d["深紫"]=255; d["金"]=220;
         } else if (name == "低饱和高级") {
             d["红"]=140; d["绿"]=150; d["蓝"]=160; d["黄"]=130; d["品红"]=140; d["青"]=150;
-            d["紫"]=130; d["天蓝"]=150; d["粉"]=160; d["浅绿"]=140; d["浅紫"]=150; d["橙"]=130;
+            d["紫"]=130; d["天蓝"]=150; d["粉"]=160; d["浅绿"]=140; d["浅紫"]=150; d["浅橙"]=130;
             d["深蓝"]=120; d["深绿"]=130; d["深紫"]=140; d["金"]=140;
         } else if (name == "中性") {
             d["红"]=128; d["绿"]=128; d["蓝"]=128; d["黄"]=128; d["品红"]=128; d["青"]=128;
-            d["紫"]=128; d["天蓝"]=128; d["粉"]=128; d["浅绿"]=128; d["浅紫"]=128; d["橙"]=128;
+            d["紫"]=128; d["天蓝"]=128; d["粉"]=128; d["浅绿"]=128; d["浅紫"]=128; d["浅橙"]=128;
             d["深蓝"]=128; d["深绿"]=128; d["深紫"]=128; d["金"]=128;
         } else if (name == "国风") {
             d["红"]=255; d["绿"]=50;  d["蓝"]=40;  d["黄"]=160; d["品红"]=130; d["青"]=50;
-            d["紫"]=110; d["天蓝"]=40;  d["粉"]=110; d["浅绿"]=70; d["浅紫"]=130; d["橙"]=180;
+            d["紫"]=110; d["天蓝"]=40;  d["粉"]=110; d["浅绿"]=70; d["浅紫"]=130; d["浅橙"]=180;
             d["深蓝"]=35; d["深绿"]=55;  d["深紫"]=160; d["金"]=240;
         }
         m_templateData[tIdx].customColor = QColor(200, 200, 200);
@@ -634,38 +724,38 @@ private:
 
         if (name == "开场暖光") {
             d.colorValues = {{"红",255},{"绿",60},{"蓝",30},{"黄",255},{"品红",160},{"青",30},
-                             {"紫",100},{"天蓝",30},{"粉",220},{"浅绿",60},{"浅紫",120},{"橙",255},
+                             {"紫",100},{"天蓝",30},{"粉",220},{"浅绿",60},{"浅紫",120},{"浅橙",255},
                              {"深蓝",20},{"深绿",25},{"深紫",80},{"金",240}};
             d.effectValues["主控"] = 200;
         } else if (name == "前奏渐亮") {
             d.colorValues = {{"红",100},{"绿",100},{"蓝",100},{"黄",100},{"品红",100},{"青",100},
-                             {"紫",100},{"天蓝",100},{"粉",100},{"浅绿",100},{"浅紫",100},{"橙",100},
+                             {"紫",100},{"天蓝",100},{"粉",100},{"浅绿",100},{"浅紫",100},{"浅橙",100},
                              {"深蓝",100},{"深绿",100},{"深紫",100},{"金",100}};
             d.effectValues["主控"] = 128;
             d.effectValues["主渐亮"] = 120;
         } else if (name == "频闪效果") {
             d.colorValues = {{"红",255},{"绿",30},{"蓝",255},{"黄",30},{"品红",255},{"青",255},
-                             {"紫",255},{"天蓝",30},{"粉",255},{"浅绿",30},{"浅紫",255},{"橙",30},
+                             {"紫",255},{"天蓝",30},{"粉",255},{"浅绿",30},{"浅紫",255},{"浅橙",30},
                              {"深蓝",255},{"深绿",30},{"深紫",255},{"金",255}};
             d.effectValues["主控"] = 128;
             d.effectValues["频闪"] = 120;
         } else if (name == "左-右") {
             d.colorValues = {{"红",200},{"绿",180},{"蓝",200},{"黄",180},{"品红",200},{"青",180},
-                             {"紫",200},{"天蓝",180},{"粉",200},{"浅绿",180},{"浅紫",200},{"橙",180},
+                             {"紫",200},{"天蓝",180},{"粉",200},{"浅绿",180},{"浅紫",200},{"浅橙",180},
                              {"深蓝",200},{"深绿",180},{"深紫",200},{"金",180}};
             d.effectValues["主控"] = 150;
             d.effectValues["从左到右亮"] = 100;
             d.effectValues["从左到右一只流水"] = 60;
         } else if (name == "渐变呼吸") {
             d.colorValues = {{"红",120},{"绿",140},{"蓝",160},{"黄",120},{"品红",140},{"青",160},
-                             {"紫",130},{"天蓝",160},{"粉",140},{"浅绿",150},{"浅紫",140},{"橙",120},
+                             {"紫",130},{"天蓝",160},{"粉",140},{"浅绿",150},{"浅紫",140},{"浅橙",120},
                              {"深蓝",150},{"深绿",140},{"深紫",150},{"金",130}};
             d.effectValues["主控"] = 100;
             d.effectValues["主渐亮"] = 80;
             d.effectValues["主渐暗"] = 80;
         } else if (name == "快速跑灯") {
             d.colorValues = {{"红",255},{"绿",200},{"蓝",255},{"黄",200},{"品红",255},{"青",200},
-                             {"紫",255},{"天蓝",200},{"粉",255},{"浅绿",200},{"浅紫",255},{"橙",200},
+                             {"紫",255},{"天蓝",200},{"粉",255},{"浅绿",200},{"浅紫",255},{"浅橙",200},
                              {"深蓝",255},{"深绿",200},{"深紫",255},{"金",255}};
             d.effectValues["主控"] = 180;
             d.effectValues["单只跑灯"] = 100;
@@ -673,7 +763,7 @@ private:
             d.effectValues["多只跑灯"] = 60;
         } else if (name == "收光") {
             d.colorValues = {{"红",80},{"绿",60},{"蓝",50},{"黄",70},{"品红",60},{"青",50},
-                             {"紫",60},{"天蓝",50},{"粉",70},{"浅绿",50},{"浅紫",60},{"橙",80},
+                             {"紫",60},{"天蓝",50},{"粉",70},{"浅绿",50},{"浅紫",60},{"浅橙",80},
                              {"深蓝",40},{"深绿",40},{"深紫",50},{"金",100}};
             d.effectValues["主控"] = 60;
             d.effectValues["主渐暗"] = 100;
@@ -711,7 +801,7 @@ private:
             {"红", QColor(220,40,40)}, {"绿", QColor(40,180,40)}, {"蓝", QColor(40,80,220)},
             {"黄", QColor(220,220,40)}, {"品红", QColor(220,40,180)}, {"青", QColor(40,200,200)},
             {"紫", QColor(140,40,200)}, {"天蓝", QColor(80,180,240)}, {"粉", QColor(255,160,180)},
-            {"浅绿", QColor(140,220,140)}, {"浅紫", QColor(200,160,220)}, {"橙", QColor(240,160,40)},
+            {"浅绿", QColor(140,220,140)}, {"浅紫", QColor(200,160,220)}, {"浅橙", QColor(255,185,80)},
             {"深蓝", QColor(20,40,140)}, {"深绿", QColor(20,100,20)}, {"深紫", QColor(80,20,120)},
             {"金", QColor(220,180,40)},
         };
@@ -727,7 +817,7 @@ private:
     // Color list
     const QStringList m_colors = {
         "红","绿","蓝","黄","品红","青","紫","天蓝","粉","浅绿",
-        "浅紫","橙","深蓝","深绿","深紫","金","自定义"
+        "浅紫","浅橙","深蓝","深绿","深紫","金","自定义"
     };
     // Effect list
     const QStringList m_effects = {
@@ -750,6 +840,9 @@ private:
     QList<TemplateData> m_savedTemplateData;
     QStringList m_savedTemplateNames;
     bool m_dirty = false;
+    QTimer *m_debounceTimer = nullptr;
+    QList<Fixture *> m_fixtures;         // 绑定的灯具列表（MainWindow 传入）
+    VideoPreviewPopup *m_videoPopup = nullptr;
     QLabel *m_infoName = nullptr;
     QLabel *m_infoChannels = nullptr;
     QLabel *m_infoFixtures = nullptr;
