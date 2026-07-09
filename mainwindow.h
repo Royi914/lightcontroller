@@ -15,6 +15,7 @@ namespace Ui { class MainWindow; }
 QT_END_NAMESPACE
 
 class ArtNetSender;
+class ArtNetReceiver;
 class Universe;
 class DMXUSBWidget;
 class FixtureItem;
@@ -64,6 +65,7 @@ private slots:
     void on_artnetRadio_toggled(bool checked);
     void on_dmxRadio_toggled(bool checked);
     void on_connectButton_clicked();
+    void on_manualIpBtn_clicked();
 
     // 菜单
     void on_actionNew_triggered();
@@ -77,6 +79,10 @@ private:
     void removeFixture(Fixture *f);
     void selectFixture(Fixture *f);
     void sendDmx();
+    void sendDmxRaw(const QByteArray &data);
+    void onArtNetReceived(uint16_t universe, const QByteArray &data);
+    void saveAllData();
+    void loadAllData();
     void updateChannelControls();
     void refreshFixtureList();
     void showControlMode(Fixture *f);
@@ -94,6 +100,7 @@ private:
     AddressPage          *m_addressPage = nullptr;
     LibraryPage          *m_libraryPage = nullptr;
     class ProgramPage    *m_programPage = nullptr;
+    class DmxMonitor     *m_dmxMonitor  = nullptr;
     Globe3D              *m_globe3D     = nullptr;
     StageLayout          *m_stageLayout = nullptr;
     QPushButton          *m_prevBtn     = nullptr;
@@ -109,6 +116,7 @@ private:
     QStackedWidget       *m_masterStack = nullptr;
     class Timeline       *m_timeline    = nullptr;
     ArtNetSender         *m_artnet      = nullptr;
+    ArtNetReceiver       *m_receiver    = nullptr;
     DMXUSBWidget         *m_dmxDevice   = nullptr;
     bool                  m_connected   = false;
 
@@ -120,8 +128,8 @@ private:
     QMap<Fixture *, QString> m_stageMap;  // fixture → stage position name
 
     bool                  m_useArtnet    = true;
-    bool                  m_syncOnly     = false;
     bool                  m_deleteMode   = false;
+    bool                  m_switchingDomain = false;
 };
 
 #endif // MAINWINDOW_H

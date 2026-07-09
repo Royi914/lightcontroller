@@ -2,6 +2,7 @@
 #include "ui_mainwindow.h"
 
 #include "ArtNetSender.h"
+#include "ArtNetReceiver.h"
 #include "Universe.h"
 #include "fixtureitem.h"
 #include "dropview.h"
@@ -12,8 +13,11 @@
 #include "programpage.h"
 #include "globe3d.h"
 #include "colorwheel.h"
+
+#include <QNetworkInterface>
 #include "beamwidget.h"
 #include "timeline.h"
+#include "dmxmonitor.h"
 #include "dmxusbwidget.h"
 
 #include <QKeyEvent>
@@ -34,6 +38,11 @@
 #include <QScrollArea>
 #include <QStyle>
 #include <QApplication>
+#include <QStandardPaths>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QDir>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -55,9 +64,8 @@ MainWindow::MainWindow(QWidget *parent)
                 addFixtureToCurrent(m_library[idx], pos);
         });
 
-    // 场景选择变化
+    // 场景选择变化（仅在用户主动点击 2D 场景时触发）
     connect(m_scene, &QGraphicsScene::selectionChanged, this, [this]() {
-        if (m_syncOnly) return;
         auto sel = m_scene->selectedItems();
         if (!sel.isEmpty()) {
             auto *item = dynamic_cast<FixtureItem *>(sel.first());
@@ -121,6 +129,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_libraryPage->setLibrary(m_library);
     m_addressPage = new AddressPage;
     m_programPage = new ProgramPage;
+    m_dmxMonitor  = new DmxMonitor;
 
     // 舞台选择页（wrapper：StageLayout + 返回按钮）
     auto *stagePage = new QWidget;
@@ -173,6 +182,12 @@ MainWindow::MainWindow(QWidget *parent)
             }
         }
         m_programPage->setFixtureInfo(model, channels);
+        // 查找绑定到这些舞台位置的灯具，传给编程页
+        QList<Fixture *> progFixtures;
+        for (auto it = m_stageMap.begin(); it != m_stageMap.end(); ++it) {
+            if (selNames.contains(it.value())) progFixtures << it.key();
+        }
+        m_programPage->setFixtures(progFixtures);
         updateProgramPageInfo();
         m_stageLayout->clearSelection();  // clear blue highlight, keep green occupied
         m_masterStack->setCurrentIndex(4);
@@ -191,6 +206,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_masterStack->addWidget(m_addressPage);       // 2 = 域管理
     m_masterStack->addWidget(stagePage);           // 3 = 舞台选择
     m_masterStack->addWidget(m_programPage);       // 4 = 编程编辑
+    m_masterStack->addWidget(m_dmxMonitor);        // 5 = DMX 监视器
     setCentralWidget(m_masterStack);
     connect(m_libraryPage, &LibraryPage::goBackRequested, this, [this]() { m_masterStack->setCurrentIndex(0); });
     connect(m_libraryPage, &LibraryPage::libraryUpdated, this, [this](const QList<FixtureDef> &lib) {
@@ -209,6 +225,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_addressPage, &AddressPage::domainSwitched, this, [this](int idx) { switchDomain(idx); });
     connect(m_programPage, &ProgramPage::backRequested, this, [this]() { m_masterStack->setCurrentIndex(0); });
     connect(m_programPage, &ProgramPage::backToStageRequested, this, [this]() { m_masterStack->setCurrentIndex(3); });
+    connect(m_dmxMonitor, &DmxMonitor::goBackRequested, this, [this]() { m_masterStack->setCurrentIndex(0); });
+    // ProgramPage 模板编辑 → DMX 输出
+    connect(m_programPage, &ProgramPage::dmxOutputRequested, this, &MainWindow::sendDmx);
     // 地址页：新建域
     connect(m_addressPage, &AddressPage::newDomainRequested, this, [this](const QString &model, int ch) {
         while (m_universes.size() <= m_addressPage->curDomain())
@@ -249,12 +268,18 @@ MainWindow::MainWindow(QWidget *parent)
     });
     ui->menubar->insertAction(ui->menuWindow->menuAction(), actProg);
 
+    // 菜单：DMX 监视器
+    auto *actDmxMon = new QAction("DMX监视", this);
+    connect(actDmxMon, &QAction::triggered, this, [this]() {
+        m_masterStack->setCurrentIndex(5);
+    });
+    ui->menubar->insertAction(ui->menuWindow->menuAction(), actDmxMon);
+
     // ===== 域1（必须在 m_addressPage 之后）=====
     m_universes << new Universe(0, this);
     switchDomain(0);  // 初始化视图
 
-    // ===== Art-Net =====
-    m_artnet = new ArtNetSender("192.168.1.255", this);
+    // Art-Net 发送器在用户点击"连接"时创建，此处不再预创建
 
     // 调色盘按钮（控制页左上角，放在返回按钮右边）
     m_colorBtn = new QPushButton;
@@ -332,6 +357,9 @@ MainWindow::MainWindow(QWidget *parent)
         if (m_timeline) { m_timeline->pause(); m_timeline->resetPlayhead(); }
         m_timelinePlaying = false;
         syncPlayBtn();
+        // 停止时发送全零 DMX（黑场）
+        QByteArray blackout(512, '\0');
+        sendDmxRaw(blackout);
     });
     connect(m_nextBtn, &QPushButton::clicked, this, [this]() {
         if (m_timeline) { m_timeline->stepNext(); m_timelinePlaying = false; syncPlayBtn(); }
@@ -351,8 +379,24 @@ MainWindow::MainWindow(QWidget *parent)
     ui->timelinePlaceholder->hide();
     ui->timelineHeader->hide();
 
+    // 时间线 → DMX 输出
+    connect(m_timeline, &Timeline::playheadDmxReady, this,
+        [this](double, const QByteArray &mergedDmx) {
+            sendDmxRaw(mergedDmx);
+        });
+    // 时间线 → 捕获 DMX
+    connect(m_timeline, &Timeline::captureRequested, this, [this]() {
+        Universe *u = currentUniverse();
+        if (u) {
+            u->render();
+            m_timeline->captureBlockDmx(u->data(), m_currentDomain);
+        }
+    });
+
     // 已添加灯具右键菜单
     ui->fixtureList->setContextMenuPolicy(Qt::CustomContextMenu);
+    ui->fixtureList->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    ui->fixtureList->setFocusPolicy(Qt::StrongFocus);
     connect(ui->fixtureList, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
         QListWidgetItem *item = ui->fixtureList->itemAt(pos);
         if (!item) return;
@@ -586,6 +630,9 @@ MainWindow::MainWindow(QWidget *parent)
 
     // 默认显示灯库模式
     ui->leftStack->setCurrentIndex(0);
+
+    // 加载持久化数据
+    loadAllData();
 }
 
 void MainWindow::syncPlayBtn()
@@ -617,19 +664,61 @@ void MainWindow::keyPressEvent(QKeyEvent *event)
     }
     if (ui->fixtureList->hasFocus()) {
         auto items = ui->fixtureList->selectedItems();
+        if (items.isEmpty()) return;
+        // 确认删除
+        QStringList names;
         for (auto *it : items) {
             int row = ui->fixtureList->row(it);
-            auto list = currentUniverse()->fixtures();
-            if (row >= 0 && row < list.size()) removeFixture(list[row]);
+            // 遍历所有域找到对应灯具（refreshFixtureList 逻辑）
+            for (auto *uv : m_universes) {
+                if (!uv) continue;
+                auto list = uv->fixtures();
+                if (row >= 0 && row < list.size()) {
+                    names << list[row]->name();
+                    row -= list.size();
+                } else {
+                    row -= uv->fixtures().size();
+                }
+            }
+        }
+        if (names.isEmpty()) return;
+        auto answer = QMessageBox::question(this, "确认删除",
+            QString("确定要删除 %1 个灯具吗？\n%2")
+            .arg(names.size()).arg(names.join(", ")),
+            QMessageBox::Yes | QMessageBox::No);
+        if (answer != QMessageBox::Yes) return;
+        // 执行删除
+        for (auto *it : items) {
+            int row = ui->fixtureList->row(it);
+            for (auto *uv : m_universes) {
+                if (!uv) continue;
+                auto list = uv->fixtures();
+                if (row >= 0 && row < list.size()) {
+                    removeFixture(list[row]);
+                    break;
+                }
+                row -= uv->fixtures().size();
+            }
         }
         return;
     }
     auto sel = m_scene->selectedItems();
     if (!sel.isEmpty()) {
+        QStringList sceneNames;
+        for (auto *si : sel)
+            if (auto *fi = dynamic_cast<FixtureItem *>(si))
+                sceneNames << fi->fixture()->name();
+        if (sceneNames.isEmpty()) { QMainWindow::keyPressEvent(event); return; }
+        auto answer = QMessageBox::question(this, "确认删除",
+            QString("确定要删除 %1 个灯具吗？\n%2")
+            .arg(sceneNames.size()).arg(sceneNames.join(", ")),
+            QMessageBox::Yes | QMessageBox::No);
+        if (answer != QMessageBox::Yes) return;
         for (auto *si : sel) {
             auto *fi = dynamic_cast<FixtureItem *>(si);
             if (fi) removeFixture(fi->fixture());
         }
+        return;
     }
     QMainWindow::keyPressEvent(event);
 }
@@ -657,9 +746,14 @@ void MainWindow::updateProgramPageInfo()
 
 void MainWindow::switchDomain(int domainIndex)
 {
-    if (domainIndex < 0) return;
-    while (domainIndex >= m_universes.size())
-        m_universes << new Universe(m_universes.size(), this);
+    if (domainIndex < 0 || domainIndex == m_currentDomain) return;
+    if (m_switchingDomain) return;  // 防重入
+    m_switchingDomain = true;
+    while (domainIndex >= m_universes.size()) {
+        auto *newUv = new Universe(m_universes.size(), this);
+        if (m_artnet) newUv->bindSender(m_artnet);
+        m_universes << newUv;
+    }
 
     m_scene->clear();
     m_globe3D->clear();
@@ -692,6 +786,7 @@ void MainWindow::switchDomain(int domainIndex)
     for (auto *uv : m_universes) allFx << uv->fixtures();
     m_addressPage->updateFixtures(allFx);
     updateProgramPageInfo();
+    m_switchingDomain = false;
 }
 
 // =====================================================================
@@ -778,8 +873,11 @@ void MainWindow::addFixtureToCurrent(const FixtureDef &def, const QPointF &pos)
         domIdx = doms.size();
         m_addressPage->addDomain(def.name, def.channels);
     }
-    while (m_universes.size() <= domIdx)
-        m_universes << new Universe(m_universes.size(), this);
+    while (m_universes.size() <= domIdx) {
+        auto *newUv = new Universe(m_universes.size(), this);
+        if (m_artnet) newUv->bindSender(m_artnet);
+        m_universes << newUv;
+    }
 
     Universe *u = m_universes[domIdx];
     if (!u) return;
@@ -868,13 +966,21 @@ void MainWindow::on_fixtureList_itemSelectionChanged()
     auto items = ui->fixtureList->selectedItems();
     if (items.isEmpty()) return;
     int row = ui->fixtureList->row(items.first());
-    auto list = currentUniverse()->fixtures();
-    if (row < 0 || row >= list.size()) return;
-    Fixture *f = list[row];
-    m_syncOnly = true;
+    // 遍历所有域找到对应灯具（多域支持）
+    Fixture *f = nullptr;
+    int r = row;
+    for (auto *uv : m_universes) {
+        if (!uv) continue;
+        auto list = uv->fixtures();
+        if (r >= 0 && r < list.size()) { f = list[r]; break; }
+        r -= uv->fixtures().size();
+    }
+    if (!f) return;
+    // 用 blockSignals 防止 selectionChanged 触发 showControlMode（会隐藏列表）
+    m_scene->blockSignals(true);
     m_scene->clearSelection();
     if (auto *it = m_fixtureItems.value(f)) it->setSelected(true);
-    m_syncOnly = false;
+    m_scene->blockSignals(false);
 }
 
 void MainWindow::on_fixtureList_itemDoubleClicked(QListWidgetItem *)
@@ -882,8 +988,15 @@ void MainWindow::on_fixtureList_itemDoubleClicked(QListWidgetItem *)
     auto items = ui->fixtureList->selectedItems();
     if (items.isEmpty()) return;
     int row = ui->fixtureList->row(items.first());
-    auto list = currentUniverse()->fixtures();
-    if (row >= 0 && row < list.size()) selectFixture(list[row]);
+    Fixture *f = nullptr;
+    int r = row;
+    for (auto *uv : m_universes) {
+        if (!uv) continue;
+        auto list = uv->fixtures();
+        if (r >= 0 && r < list.size()) { f = list[r]; break; }
+        r -= uv->fixtures().size();
+    }
+    if (f) selectFixture(f);
 }
 
 // =====================================================================
@@ -928,6 +1041,7 @@ void MainWindow::showControlMode(Fixture *f)
 void MainWindow::showLibraryMode() {
     m_selected = nullptr; m_scene->clearSelection(); ui->leftStack->setCurrentIndex(0);
     if (m_beamWidget) m_beamWidget->setVisible(false);
+    ui->fixtureList->setFocus();  // 返回灯库模式时自动聚焦灯具列表
 }
 void MainWindow::on_backButton_clicked() { showLibraryMode(); }
 
@@ -952,15 +1066,31 @@ void MainWindow::rebuildControlPanel(Fixture *f)
         auto ranges = f->channelRanges(ch);
         auto *row = new QHBoxLayout;
         QString chName = f->channelName(ch);
-        // 颜色标记（统一占位，保证对齐）
+        // 图标/颜色标记（优先显示导入图标，其次 R/G/B 色标）
+        const QStringList &icons = f->definition().channelIcons;
+        bool hasChIcon = ch < icons.size() && !icons[ch].isEmpty();
+        const int markSz = 18;
         auto *mark = new QLabel;
-        mark->setFixedSize(12,12);
-        if (chName.contains("红") || chName == "R")
-            mark->setStyleSheet("background:#dc3c28;border-radius:6px;border:1px solid #999");
-        else if (chName.contains("绿") || chName == "G")
-            mark->setStyleSheet("background:#28b43c;border-radius:6px;border:1px solid #999");
-        else if (chName.contains("蓝") || chName == "B")
-            mark->setStyleSheet("background:#2850dc;border-radius:6px;border:1px solid #999");
+        mark->setFixedSize(markSz, markSz);
+        if (hasChIcon) {
+            QImage img(icons[ch]);
+            if (!img.isNull()) {
+                int sq = qMin(img.width(), img.height());
+                int cx = (img.width() - sq) / 2, cy = (img.height() - sq) / 2;
+                QPixmap pm = QPixmap::fromImage(
+                    img.copy(cx, cy, sq, sq).scaled(markSz, markSz, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                QPixmap circle(markSz, markSz); circle.fill(Qt::transparent);
+                QPainter pp(&circle); pp.setRenderHint(QPainter::Antialiasing);
+                pp.setBrush(pm); pp.setPen(QPen(QColor(0x99,0x99,0x99), 1));
+                pp.drawEllipse(1, 1, markSz - 2, markSz - 2); pp.end();
+                mark->setPixmap(circle);
+            }
+        } else if (chName.contains("红") || chName.toLower() == "r")
+            mark->setStyleSheet(QString("background:#dc3c28;border-radius:%1px;border:1px solid #999").arg(markSz/2));
+        else if (chName.contains("绿") || chName.toLower() == "g")
+            mark->setStyleSheet(QString("background:#28b43c;border-radius:%1px;border:1px solid #999").arg(markSz/2));
+        else if (chName.contains("蓝") || chName.toLower() == "b")
+            mark->setStyleSheet(QString("background:#2850dc;border-radius:%1px;border:1px solid #999").arg(markSz/2));
         else
             mark->setStyleSheet("background:transparent;border:none");
         row->addWidget(mark);
@@ -1034,14 +1164,121 @@ void MainWindow::on_blackoutButton_clicked()
 void MainWindow::on_artnetRadio_toggled(bool checked) { m_useArtnet = checked; ui->artnetIpEdit->setEnabled(checked); }
 void MainWindow::on_dmxRadio_toggled(bool checked)   { if (checked) m_useArtnet = false; }
 
+void MainWindow::on_manualIpBtn_clicked()
+{
+    // 切换 IP 编辑框的只读状态
+    bool wasReadOnly = ui->artnetIpEdit->isReadOnly();
+    ui->artnetIpEdit->setReadOnly(!wasReadOnly);
+    if (!wasReadOnly) {
+        // 重新锁定 → 重新自动计算广播地址
+        ui->manualIpBtn->setText("✎");
+        QHostAddress cur(ui->artnetIpEdit->text());
+        if (!cur.isNull()) {
+            // 根据当前 IP 找到匹配网卡，重新算广播
+            const auto ifaces = QNetworkInterface::allInterfaces();
+            for (const auto &iface : ifaces) {
+                if (iface.flags() & QNetworkInterface::IsLoopBack) continue;
+                for (const auto &entry : iface.addressEntries()) {
+                    QHostAddress lip = entry.ip();
+                    if (lip.protocol() != QAbstractSocket::IPv4Protocol || lip.isLoopback() || lip.isLinkLocal()) continue;
+                    quint32 mask = entry.netmask().toIPv4Address();
+                    if (mask == 0) continue;
+                    if ((cur.toIPv4Address() & mask) == (lip.toIPv4Address() & mask)) {
+                        quint32 bcast = (lip.toIPv4Address() & mask) | (~mask);
+                        ui->artnetIpEdit->setText(QHostAddress(bcast).toString());
+                        goto manualDone;
+                    }
+                }
+            }
+            manualDone:;
+        }
+    } else {
+        // 解锁手动输入
+        ui->manualIpBtn->setText("🔒");
+    }
+}
+
 void MainWindow::on_connectButton_clicked()
 {
+    // 如果已连接 → 断开
+    if (m_connected) {
+        if (m_artnet) {
+            delete m_artnet;
+            m_artnet = nullptr;
+        }
+        if (m_receiver) {
+            delete m_receiver;
+            m_receiver = nullptr;
+        }
+        if (m_dmxDevice) {
+            m_dmxDevice->close();
+            m_dmxDevice = nullptr;
+        }
+        m_connected = false;
+        ui->statusLabel->setText("已断开");
+        ui->connectButton->setText("连接");
+        if (m_programPage) { m_programPage->setArtNetStatus(false); updateProgramPageInfo(); }
+        if (m_libraryPage) m_libraryPage->setArtNetStatus(false);
+        return;
+    }
+
     if (m_useArtnet) {
-        QString ip = ui->artnetIpEdit->text();
-        if (m_artnet) delete m_artnet;
+        // 自动模式（只读）→ 自动计算广播；手动模式 → 用用户输入的 IP
+        if (ui->artnetIpEdit->isReadOnly()) {
+            QString ip;
+            const auto ifaces = QNetworkInterface::allInterfaces();
+            // 第一遍：找无线网卡
+            for (const auto &iface : ifaces) {
+                if (iface.flags() & QNetworkInterface::IsLoopBack) continue;
+                QString name = iface.name().toLower();
+                bool isWireless = name.contains("wireless") || name.contains("wlan") || name.contains("wi-fi");
+                if (!isWireless) continue;
+                for (const auto &entry : iface.addressEntries()) {
+                    QHostAddress lip = entry.ip();
+                    if (lip.protocol() != QAbstractSocket::IPv4Protocol || lip.isLoopback() || lip.isLinkLocal()) continue;
+                    quint32 mask = entry.netmask().toIPv4Address();
+                    if (mask == 0) continue;
+                    quint32 bcast = (lip.toIPv4Address() & mask) | (~mask);
+                    ip = QHostAddress(bcast).toString();
+                    ui->artnetIpEdit->setText(ip);
+                    goto found;
+                }
+            }
+            // 第二遍：没无线网卡就用有线（排除虚拟网卡 VMware/VirtualBox/Hyper-V）
+            for (const auto &iface : ifaces) {
+                if (iface.flags() & QNetworkInterface::IsLoopBack) continue;
+                QString name = iface.name().toLower();
+                if (name.contains("vmware") || name.contains("virtualbox") || name.contains("hyper-v")) continue;
+                for (const auto &entry : iface.addressEntries()) {
+                    QHostAddress lip = entry.ip();
+                    if (lip.protocol() != QAbstractSocket::IPv4Protocol || lip.isLoopback() || lip.isLinkLocal()) continue;
+                    quint32 mask = entry.netmask().toIPv4Address();
+                    if (mask == 0) continue;
+                    quint32 bcast = (lip.toIPv4Address() & mask) | (~mask);
+                    ip = QHostAddress(bcast).toString();
+                    ui->artnetIpEdit->setText(ip);
+                    goto found;
+                }
+            }
+            found:;
+            if (ip.isEmpty()) { ip = "255.255.255.255"; ui->artnetIpEdit->setText(ip); }
+        }
+        QString ip = ui->artnetIpEdit->text().trimmed();
+        if (ip.isEmpty()) ip = "255.255.255.255";
         m_artnet = new ArtNetSender(ip, this);
+        // 重新绑定所有 Universe
+        for (auto *uv : m_universes)
+            uv->bindSender(m_artnet);
+        // 创建 ArtNet 接收器（监听输入）
+        if (!m_receiver) {
+            m_receiver = new ArtNetReceiver(this);
+            m_receiver->bind(ARTNET_PORT);
+            connect(m_receiver, &ArtNetReceiver::dmxReceived,
+                    this, &MainWindow::onArtNetReceived);
+        }
         m_connected = true;
         ui->statusLabel->setText("已连接 - Art-Net → " + ip);
+        ui->connectButton->setText("断开连接");
         if (m_programPage) { m_programPage->setArtNetStatus(true); updateProgramPageInfo(); }
         if (m_libraryPage) m_libraryPage->setArtNetStatus(true);
     } else {
@@ -1052,6 +1289,7 @@ void MainWindow::on_connectButton_clicked()
         m_dmxDevice->setOutputFrequency(44);
         m_connected = true;
         ui->statusLabel->setText("已连接 - USB DMX");
+        ui->connectButton->setText("断开连接");
         if (m_programPage) { m_programPage->setArtNetStatus(true); updateProgramPageInfo(); }
         if (m_libraryPage) m_libraryPage->setArtNetStatus(true);
     }
@@ -1063,19 +1301,59 @@ void MainWindow::on_connectButton_clicked()
 
 void MainWindow::sendDmx()
 {
-    Universe *u = currentUniverse();
-    if (!u) return;
-    u->render();
-
     if (m_useArtnet && m_artnet) {
-        m_artnet->setChannels(u->data());
-        m_artnet->sendDmx();
+        // 遍历所有域，每个域以独立的 Art-Net Universe 发送
+        for (int i = 0; i < m_universes.size(); i++) {
+            Universe *u = m_universes[i];
+            if (!u) continue;
+            u->render();
+            m_artnet->setUniverse(i);
+            m_artnet->setChannels(u->data());
+            m_artnet->sendDmx();
+            // 更新 DMX 监视器
+            if (m_dmxMonitor) m_dmxMonitor->updateData(u->data(), i);
+        }
     } else if (m_dmxDevice) {
-        m_dmxDevice->writeUniverse(0, 0, u->data(), false);
+        // USB DMX 只有一路物理输出，发送当前域
+        Universe *u = currentUniverse();
+        if (u) {
+            u->render();
+            m_dmxDevice->writeUniverse(0, 0, u->data(), true);
+        }
     }
 
     // 性能：只在地址码页可见时刷新 UI
     if (m_addressPage->isVisible()) {
+        QList<Fixture *> allFx;
+        for (auto *uv : m_universes) allFx << uv->fixtures();
+        m_addressPage->updateFixtures(allFx);
+    }
+}
+
+void MainWindow::sendDmxRaw(const QByteArray &data)
+{
+    if (m_useArtnet && m_artnet) {
+        m_artnet->setChannels(data);
+        m_artnet->sendDmx();
+    } else if (m_dmxDevice) {
+        m_dmxDevice->writeUniverse(0, 0, data, true);
+    }
+    if (m_dmxMonitor) m_dmxMonitor->updateData(data, 0);
+}
+
+void MainWindow::onArtNetReceived(uint16_t universe, const QByteArray &data)
+{
+    // 将收到的数据写入对应 Universe
+    if (universe < m_universes.size()) {
+        Universe *u = m_universes[universe];
+        if (u) {
+            for (int i = 0; i < qMin(data.size(), 512); i++)
+                u->setChannel(i, static_cast<uint8_t>(data[i]));
+            u->render();
+        }
+    }
+    // 更新地址码页 UI
+    if (m_addressPage && m_addressPage->isVisible()) {
         QList<Fixture *> allFx;
         for (auto *uv : m_universes) allFx << uv->fixtures();
         m_addressPage->updateFixtures(allFx);
@@ -1128,7 +1406,142 @@ void MainWindow::closeEvent(QCloseEvent *event)
             return;
         }
     }
+    saveAllData();
     QMainWindow::closeEvent(event);
+}
+
+// =====================================================================
+//  持久化：自动保存/加载灯库、域、模板到 AppData
+// =====================================================================
+
+static QString dataDir()
+{
+    QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(dir);
+    return dir;
+}
+
+void MainWindow::saveAllData()
+{
+    QString dir = dataDir();
+
+    // === 保存灯库 ===
+    {
+        QJsonArray arr;
+        for (const auto &def : m_library) {
+            QJsonObject o;
+            o["name"] = def.name;
+            o["manufacturer"] = def.manufacturer;
+            o["channels"] = def.channels;
+            if (!def.iconPath.isEmpty()) o["iconPath"] = def.iconPath;
+            if (!def.channelIcons.isEmpty()) {
+                QJsonArray ciArr;
+                for (const auto &ci : def.channelIcons) ciArr << ci;
+                o["channelIcons"] = ciArr;
+            }
+            QJsonArray chArr;
+            for (int i = 0; i < def.channelNames.size(); i++) {
+                QJsonObject co;
+                co["name"] = def.channelNames[i];
+                QJsonArray rArr;
+                if (i < def.ranges.size()) {
+                    for (const auto &r : def.ranges[i]) {
+                        QJsonObject ro;
+                        ro["label"] = r.name;
+                        ro["min"] = r.minValue;
+                        ro["max"] = r.maxValue;
+                        if (!r.iconPath.isEmpty()) ro["icon"] = r.iconPath;
+                        rArr << ro;
+                    }
+                }
+                co["ranges"] = rArr;
+                chArr << co;
+            }
+            o["channelDefs"] = chArr;
+            arr << o;
+        }
+        QFile f(dir + "/library.json");
+        if (f.open(QIODevice::WriteOnly))
+            f.write(QJsonDocument(arr).toJson());
+    }
+
+    // === 保存域 ===
+    QList<AddrEntry> doms = m_addressPage->getDomains();
+    {
+        QJsonArray arr;
+        for (const auto &d : doms) {
+            QJsonObject o;
+            o["model"] = d.model;
+            o["channels"] = d.channels;
+            arr << o;
+        }
+        QFile f(dir + "/domains.json");
+        if (f.open(QIODevice::WriteOnly))
+            f.write(QJsonDocument(arr).toJson());
+    }
+
+}
+
+void MainWindow::loadAllData()
+{
+    QString dir = dataDir();
+
+    // === 加载灯库 ===
+    {
+        QFile f(dir + "/library.json");
+        if (f.open(QIODevice::ReadOnly)) {
+            QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
+            m_library.clear();
+            for (const auto &v : arr) {
+                QJsonObject o = v.toObject();
+                FixtureDef def;
+                def.name = o["name"].toString();
+                def.manufacturer = o["manufacturer"].toString();
+                def.channels = o["channels"].toInt();
+                def.iconPath = o["iconPath"].toString();
+                QJsonArray ciArr = o["channelIcons"].toArray();
+                for (const auto &civ : ciArr) def.channelIcons << civ.toString();
+                QJsonArray chArr = o["channelDefs"].toArray();
+                for (const auto &cv : chArr) {
+                    QJsonObject co = cv.toObject();
+                    def.channelNames << co["name"].toString();
+                    QJsonArray rArr = co["ranges"].toArray();
+                    QList<ChannelRange> ranges;
+                    for (const auto &rv : rArr) {
+                        QJsonObject ro = rv.toObject();
+                        ChannelRange cr;
+                        cr.name = ro["label"].toString();
+                        cr.minValue = ro["min"].toInt();
+                        cr.maxValue = ro["max"].toInt();
+                        cr.iconPath = ro["icon"].toString();
+                        ranges << cr;
+                    }
+                    def.ranges << ranges;
+                }
+                m_library << def;
+            }
+            f.close();
+        }
+    }
+
+    // === 加载域 ===
+    {
+        QFile f(dir + "/domains.json");
+        if (f.open(QIODevice::ReadOnly)) {
+            QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
+            for (const auto &v : arr) {
+                QJsonObject o = v.toObject();
+                m_addressPage->addDomain(o["model"].toString(), o["channels"].toInt());
+            }
+            f.close();
+        }
+    }
+
+    // 刷新 UI
+    ui->libraryList->clear();
+    for (const auto &d : m_library)
+        ui->libraryList->addItem(QString("%1 [%2] %3ch").arg(d.name, d.manufacturer).arg(d.channels));
+    refreshLibraryPage();
 }
 
 bool MainWindow::eventFilter(QObject *obj, QEvent *event)

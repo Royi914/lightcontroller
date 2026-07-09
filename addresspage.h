@@ -19,6 +19,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QMouseEvent>
+#include <QKeyEvent>
 #include <QTimer>
 #include <QMap>
 #include <QSet>
@@ -57,6 +58,7 @@ class AddressPage : public QWidget
 public:
     explicit AddressPage(QWidget *parent = nullptr) : QWidget(parent)
     {
+        setFocusPolicy(Qt::StrongFocus);
         auto *oroot = new QHBoxLayout(this); oroot->setContentsMargins(0,0,0,0);
         auto *tb = new QFrame; tb->setFixedWidth(140);
         tb->setStyleSheet("background:#e8e8e8;border-right:1px solid #ccc");
@@ -78,6 +80,19 @@ public:
         makeBtn("打开",   [this](){ onOpen(); });
         makeBtn("保存",   [this](){ onSave(); });
         makeBtn("另存为", [this](){ onSaveAs(); });
+        // 删除域按钮
+        auto *delDomBtn = new QPushButton(m_deleteMode ? "  完成删除" : "  删除域");
+        delDomBtn->setFixedHeight(36);
+        delDomBtn->setStyleSheet("background:#ffe0e0;color:#822;border:1px solid #caa;border-radius:4px;text-align:left;padding-left:12px");
+        connect(delDomBtn, &QPushButton::clicked, this, [this, delDomBtn]() {
+            m_deleteMode = !m_deleteMode;
+            delDomBtn->setText(m_deleteMode ? "  完成删除" : "  删除域");
+            delDomBtn->setStyleSheet(m_deleteMode
+                ? "background:#fcc;color:#c00;border:1px solid #c88;border-radius:4px;text-align:left;padding-left:12px"
+                : "background:#ffe0e0;color:#822;border:1px solid #caa;border-radius:4px;text-align:left;padding-left:12px");
+            rebuildList();
+        });
+        tbl->addWidget(delDomBtn);
         tbl->addStretch();
         auto *bk = new QPushButton("  返回主界面"); bk->setFixedHeight(36);
         bk->setStyleSheet("background:#ddd;color:#333;border:1px solid #bbb;border-radius:4px");
@@ -176,20 +191,30 @@ private:
 
         for (int i = 0; i < m_doms.size(); i++) {
             auto &d = m_doms[i]; int qty = cnts.value(d.model, 0);
-            auto *r = new QFrame; r->setStyleSheet("background:#f9f9f9;border:1px solid #eee;border-radius:3px;cursor:pointer"); r->setMinimumHeight(40);
+            auto *r = new QFrame; r->setMinimumHeight(40);
+            r->setStyleSheet(i == m_selectedDom
+                ? "QFrame { background:#dde; border:2px solid #66b; border-radius:3px; }"
+                : "QFrame { background:#f9f9f9; border:1px solid #eee; border-radius:3px; }");
             r->setProperty("di", i); r->installEventFilter(this);
             auto *hl = new QHBoxLayout(r);
             auto *dot = new QLabel; dot->setFixedSize(10,10);
             dot->setStyleSheet(i == m_cur ? "background:#0f0;border-radius:5px" : "background:transparent;border-radius:5px");
             hl->addWidget(dot);
-            hl->addWidget(new QLabel(QString("灯型号：%1    通道：%2    数量：%3").arg(d.model).arg(d.channels).arg(cnts.value(d.model, 0))));
+            auto *lbl = new QLabel(QString("灯型号：%1    通道：%2    数量：%3").arg(d.model).arg(d.channels).arg(cnts.value(d.model, 0)));
+            lbl->setStyleSheet("border:none; background:transparent;");
+            hl->addWidget(lbl);
             hl->addStretch();
             if (m_deleteMode) {
                 auto *xBtn = new QPushButton("×"); xBtn->setFixedSize(24,24);
                 xBtn->setStyleSheet("color:red;font-weight:bold;border:none;background:transparent;font-size:16px");
                 int idx = i;
-                connect(xBtn, &QPushButton::clicked, this, [this, idx]() {
-                    QString m = m_doms[idx].model; m_doms.removeAt(idx);
+                connect(xBtn, &QPushButton::clicked, this, [this, idx, xBtn]() {
+                    QString m = m_doms[idx].model;
+                    auto answer = QMessageBox::question(this, "确认删除",
+                        QString("确定要删除域「%1」吗？").arg(m),
+                        QMessageBox::Yes | QMessageBox::No);
+                    if (answer != QMessageBox::Yes) return;
+                    m_doms.removeAt(idx);
                     if (m_cur >= m_doms.size()) m_cur = m_doms.size() - 1;
                     rebuildList();
                     emit deleteDomainRequested(m);
@@ -228,16 +253,51 @@ private:
         m_detailL->addWidget(new QLabel("点击域查看地址码"));
     }
 
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        if (event->key() == Qt::Key_Delete && m_selectedDom >= 0
+            && m_selectedDom < m_doms.size()) {
+            QString m = m_doms[m_selectedDom].model;
+            auto answer = QMessageBox::question(this, "确认删除",
+                QString("确定要删除域「%1」吗？").arg(m),
+                QMessageBox::Yes | QMessageBox::No);
+            if (answer == QMessageBox::Yes) {
+                m_doms.removeAt(m_selectedDom);
+                if (m_cur >= m_doms.size()) m_cur = m_doms.size() - 1;
+                m_selectedDom = -1;
+                rebuildList();
+                emit deleteDomainRequested(m);
+            }
+            return;
+        }
+        QWidget::keyPressEvent(event);
+    }
+
     bool eventFilter(QObject *o, QEvent *e) override {
+        if (e->type() == QEvent::MouseButtonPress && !m_deleteMode && !m_rebuilding) {
+            auto *f = qobject_cast<QFrame *>(o);
+            if (f && f->property("di").isValid()) {
+                int i = f->property("di").toInt();
+                m_selectedDom = (i == m_selectedDom) ? -1 : i;
+                setFocus();
+                rebuildList();
+                return true;
+            }
+        }
         if (e->type() == QEvent::MouseButtonDblClick && !m_deleteMode && !m_rebuilding) {
             auto *f = qobject_cast<QFrame *>(o);
             if (f && f->property("di").isValid()) {
                 int i = f->property("di").toInt();
                 if (i >= 0 && i < m_doms.size()) {
                     m_cur = i;
-                    emit domainSwitched(i);
+                    m_selectedDom = -1;
                     m_rebuilding = true;
-                    QTimer::singleShot(0, this, [this]() { rebuildList(); m_rebuilding = false; });
+                    int di = i;
+                    QTimer::singleShot(0, this, [this, di]() {
+                        emit domainSwitched(di);
+                        rebuildList();
+                        m_rebuilding = false;
+                    });
                 }
             }
         }
@@ -247,6 +307,7 @@ private:
     QWidget *m_listW; QVBoxLayout *m_listL; QFrame *m_detail; QVBoxLayout *m_detailL;
     QList<AddrEntry> m_doms; int m_cur = 0; QList<Fixture *> m_all;
     bool m_deleteMode = false; bool m_rebuilding = false;
+    int m_selectedDom = -1;  // 单击选中的域（Delete 删除）
 };
 
 #endif

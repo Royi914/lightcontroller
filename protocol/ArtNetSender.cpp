@@ -4,7 +4,38 @@
  */
 
 #include "ArtNetSender.h"
+#include <QDebug>
+#include <QNetworkInterface>
 #include <QtEndian>
+
+// 根据目标地址找到同一子网的本地 IP，找不到则返回 AnyIPv4
+static QHostAddress findLocalIpForTarget(const QHostAddress &target)
+{
+    // 如果是回环、广播或 Any，走任意接口
+    if (target == QHostAddress::LocalHost ||
+        target == QHostAddress::Broadcast ||
+        target == QHostAddress::AnyIPv4)
+        return QHostAddress::AnyIPv4;
+
+    const auto ifaces = QNetworkInterface::allInterfaces();
+    for (const auto &iface : ifaces) {
+        if (iface.flags() & QNetworkInterface::IsLoopBack)
+            continue;
+        for (const auto &entry : iface.addressEntries()) {
+            QHostAddress ip = entry.ip();
+            if (ip.protocol() != QAbstractSocket::IPv4Protocol || ip.isLoopback())
+                continue;
+            // 检查目标和本地 IP 是否在同一子网
+            quint32 targetBits = target.toIPv4Address();
+            quint32 localBits  = ip.toIPv4Address();
+            quint32 maskBits   = entry.netmask().toIPv4Address();
+            if (maskBits == 0) continue;
+            if ((targetBits & maskBits) == (localBits & maskBits))
+                return ip;
+        }
+    }
+    return QHostAddress::AnyIPv4; // fallback
+}
 
 ArtNetSender::ArtNetSender(const QString &address, QObject *parent)
     : QObject(parent)
@@ -17,6 +48,13 @@ ArtNetSender::ArtNetSender(const QString &address, QObject *parent)
 {
     m_dmxData.fill(0, DMX_UNIVERSE_SIZE);
     m_lastSentData.fill(0, DMX_UNIVERSE_SIZE);
+
+    // 绑定到目标子网对应的本地网卡 IP，确保广播从正确网卡发出
+    QHostAddress target(address);
+    QHostAddress local = findLocalIpForTarget(target);
+    if (local != QHostAddress::AnyIPv4)
+        qInfo() << "ArtNetSender: bind to" << local.toString() << "for target" << address;
+    m_socket->bind(local, 0);
 }
 
 ArtNetSender::~ArtNetSender()
@@ -55,6 +93,12 @@ void ArtNetSender::sendDmx()
         m_sequence++;
         m_lastSentData = m_dmxData;
         emit dmxSent();
+    }
+    else
+    {
+        qWarning() << "ArtNetSender::sendDmx() writeDatagram failed, error:"
+                   << m_socket->errorString()
+                   << "address:" << m_address.toString();
     }
 }
 
