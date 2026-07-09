@@ -1,22 +1,51 @@
 #include "globe3d.h"
 #include "Fixture.h"
+#include <QResizeEvent>
 #include <QtMath>
 
 QMatrix4x4 OrbitCamera::viewMatrix() const
 {
     QMatrix4x4 m;
     m.translate(0, 0, -distance);
-    m.rotate(-altitude, 1, 0, 0);
-    m.rotate(-azimuth, 0, 1, 0);
+    m.rotate(rotation.conjugated());  // camera rotation: quaternion conjugate maps world→camera
     m.translate(-target);
     return m;
 }
-void OrbitCamera::rotate(float dAz, float dAlt) { azimuth += dAz; altitude += dAlt; if (altitude > 89) altitude = 89; if (altitude < 1) altitude = 1; }
+void OrbitCamera::rotate(float dx, float dy)
+{
+    float speed = 0.3f;
+    // Yaw: rotate around world Y axis (horizontal mouse)
+    QQuaternion yaw = QQuaternion::fromAxisAndAngle(QVector3D(0, 1, 0), dx * speed);
+    // Pitch: rotate around camera's local right axis (vertical mouse)
+    QVector3D right = rotation * QVector3D(1, 0, 0);
+    QQuaternion pitch = QQuaternion::fromAxisAndAngle(right, dy * speed);
+    // Accumulate: apply world yaw, then camera-local pitch
+    rotation = pitch * yaw * rotation;
+    rotation.normalize();
+}
 void OrbitCamera::zoom(float d) { distance -= d; if (distance < 3) distance = 3; if (distance > 100) distance = 100; }
 void OrbitCamera::pan(float dx, float dy) { target += QVector3D(dx, dy, 0); }
 
-Globe3D::Globe3D(QWidget *parent) : QOpenGLWidget(parent) { setMinimumSize(400, 300); setMouseTracking(true); }
+Globe3D::Globe3D(QWidget *parent) : QOpenGLWidget(parent)
+{
+    setMinimumSize(400, 300); setMouseTracking(true);
+    // 左下角复位按钮
+    m_resetBtn = new QPushButton("⟳", this);
+    m_resetBtn->setFixedSize(28, 28);
+    m_resetBtn->setToolTip("复位视角");
+    m_resetBtn->setStyleSheet(
+        "QPushButton { background:rgba(60,60,60,180); color:#fff; border:none; border-radius:14px; font-size:16px; }"
+        "QPushButton:hover { background:rgba(80,80,80,220); }");
+    m_resetBtn->move(8, height() - 36);
+    connect(m_resetBtn, &QPushButton::clicked, this, &Globe3D::onResetView);
+}
 Globe3D::~Globe3D() = default;
+
+void Globe3D::onResetView()
+{
+    m_camera.reset();
+    update();
+}
 
 void Globe3D::addFixture(Fixture *f, const QPointF &pos2D)
 {
@@ -30,10 +59,28 @@ void Globe3D::removeFixture(Fixture *f)
         if (m_fixtures[i].fixture == f) { m_fixtures.removeAt(i); break; }
     if (m_selected == f) m_selected = nullptr; update();
 }
-void Globe3D::updateFixture(Fixture *)
+void Globe3D::updateFixture(Fixture *f)
 {
-    for (auto &gf : m_fixtures)
-        gf.color = Qt::white;
+    for (auto &gf : m_fixtures) {
+        if (f && gf.fixture != f) continue;
+        uint8_t dimmer = gf.fixture->dimmer();
+        if (dimmer == 0) {
+            gf.color = QColor(40, 40, 40);
+        } else {
+            int r = dimmer, g = dimmer, b = dimmer;
+            for (int ch = 0; ch < gf.fixture->channelCount(); ch++) {
+                QString n = gf.fixture->channelName(ch).toLower();
+                uint8_t v = gf.fixture->channelValue(ch);
+                if (n == "r" || n == "red" || n == "红")   r = v;
+                if (n == "g" || n == "green" || n == "绿") g = v;
+                if (n == "b" || n == "blue" || n == "蓝")  b = v;
+            }
+            gf.color = QColor(
+                qMin(255, r * dimmer / 255),
+                qMin(255, g * dimmer / 255),
+                qMin(255, b * dimmer / 255));
+        }
+    }
     update();
 }
 void Globe3D::updateFixturePosition(Fixture *f, const QPointF &pos2D)
@@ -55,6 +102,12 @@ void Globe3D::initializeGL()
     glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
     GLfloat lp[] = { 10, 20, 10, 1 }, la[] = { 0.2f, 0.2f, 0.25f, 1 };
     glLightfv(GL_LIGHT0, GL_POSITION, lp); glLightfv(GL_LIGHT0, GL_AMBIENT, la);
+}
+
+void Globe3D::resizeEvent(QResizeEvent *e)
+{
+    QOpenGLWidget::resizeEvent(e);
+    if (m_resetBtn) m_resetBtn->move(8, height() - 36);
 }
 
 void Globe3D::resizeGL(int w, int h)
@@ -139,15 +192,17 @@ void Globe3D::mouseMoveEvent(QMouseEvent *e)
     float dx = e->pos().x() - m_lastMouse.x(), dy = e->pos().y() - m_lastMouse.y();
     m_lastMouse = e->pos();
     if (m_leftPressed && m_selected) {
-        for (auto &gf : m_fixtures) if (gf.fixture == m_selected) {
-            gf.position += QVector3D(dx * 0.05f, 0, -dy * 0.05f);
-            // Sync back to 2D coords
-            QPointF pos2D(gf.position.x() * 40.0f, gf.position.z() * 40.0f);
-            emit fixtureMoved3D(m_selected, pos2D);
-            update(); break;
+        // 屏幕坐标 → 地面交点，灯具贴附鼠标移动
+        QPointF ground = screenToGround(e->pos());
+        if (!ground.isNull()) {
+            for (auto &gf : m_fixtures) if (gf.fixture == m_selected) {
+                gf.position = QVector3D(ground.x() / 40.0f, 0, ground.y() / 40.0f);
+                emit fixtureMoved3D(m_selected, ground);
+                update(); break;
+            }
         }
     }
-    if (m_rightPressed) { m_camera.rotate(dx * 0.3f, dy * 0.3f); update(); }
+    if (m_rightPressed) { m_camera.rotate(dx, dy); update(); }
     if (m_midPressed)   { m_camera.pan(-dx * 0.05f, dy * 0.05f); update(); }
 }
 
@@ -159,6 +214,30 @@ void Globe3D::mouseReleaseEvent(QMouseEvent *e)
 }
 
 void Globe3D::wheelEvent(QWheelEvent *e) { m_camera.zoom(e->angleDelta().y() * 0.03f); update(); }
+
+QPointF Globe3D::screenToGround(const QPoint &screenPos)
+{
+    int w = width(), h = height(); if (w < 1 || h < 1) return QPointF();
+    // 重构投影矩阵（与 resizeGL 一致）
+    float fov = 45.0f, asp = float(w) / h;
+    float f = 1.0f / tan(fov * M_PI / 360.0f);
+    QMatrix4x4 proj(f/asp,0,0,0,  0,f,0,0,  0,0,-1.002f,-1,  0,0,-1.0f,0);
+    // 逆矩阵：clip → world
+    QMatrix4x4 inv = (proj * m_camera.viewMatrix()).inverted();
+    // NDC
+    float nx = 2.0f * screenPos.x() / w - 1.0f;
+    float ny = 1.0f - 2.0f * screenPos.y() / h;
+    // 近/远裁面点 → world
+    QVector4D np = inv * QVector4D(nx, ny, -1, 1); np /= np.w();
+    QVector4D fp = inv * QVector4D(nx, ny,  1, 1); fp /= fp.w();
+    QVector3D dir = (fp.toVector3D() - np.toVector3D()).normalized();
+    // 与 Y=0 地面相交
+    if (qAbs(dir.y()) < 0.0001f) return QPointF();
+    float t = -np.y() / dir.y();
+    QVector3D hit = np.toVector3D() + t * dir;
+    // 转回 2D 舞台坐标
+    return QPointF(hit.x() * 40.0f, hit.z() * 40.0f);
+}
 
 Fixture *Globe3D::pickFixture(const QPoint &screenPos)
 {

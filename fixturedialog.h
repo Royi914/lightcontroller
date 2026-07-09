@@ -11,6 +11,7 @@
 #include <QScrollArea>
 #include <QFormLayout>
 #include <QList>
+#include <QFileDialog>
 #include <QDialogButtonBox>
 
 #include "Fixture.h"
@@ -52,6 +53,7 @@ public:
                 r.name = row.nameEdit->text();
                 r.minValue = row.minSpin->value();
                 r.maxValue = row.maxSpin->value();
+                r.iconPath = row.iconPath;
                 result << r;
             }
         }
@@ -64,11 +66,16 @@ public:
         m_rows.clear();
         while (m_layout->count() > 0) delete m_layout->takeAt(0);
         for (const auto &r : ranges) {
-            addRow(false);  // don't auto-split when loading saved ranges
+            addRow(false);
             auto &row = m_rows.last();
             row.nameEdit->setText(r.name);
             row.minSpin->setValue(r.minValue);
             row.maxSpin->setValue(r.maxValue);
+            row.iconPath = r.iconPath;
+            if (!r.iconPath.isEmpty() && row.iconBtn) {
+                row.iconBtn->setText("🖼");
+                row.iconBtn->setToolTip("已导入图标");
+            }
         }
         if (m_rows.isEmpty()) addRow();
     }
@@ -121,22 +128,33 @@ private slots:
         maxSpin->setPrefix("到 ");
         hl->addWidget(maxSpin);
 
+        auto *iconBtn = new QPushButton("📁");
+        iconBtn->setFixedSize(22, 22);
+        iconBtn->setToolTip("导入图标");
+        iconBtn->setStyleSheet("border:none;background:transparent;font-size:11px;");
+        hl->addWidget(iconBtn);
+
         auto *delBtn = new QPushButton(QString::fromUtf8("\xc3\x97"));  // ×
         delBtn->setFixedSize(24, 24);
         delBtn->setStyleSheet("color:red;font-weight:bold;border:none");
-        connect(delBtn, &QPushButton::clicked, this, [this, container]() {
-            for (int i = 0; i < m_rows.size(); i++) {
-                if (m_rows[i].container == container) {
-                    delete m_rows[i].nameEdit;
-                    delete m_rows[i].minSpin;
-                    delete m_rows[i].maxSpin;
-                    delete m_rows[i].container;
-                    m_rows.removeAt(i);
-                    break;
+        hl->addWidget(delBtn);
+
+        m_rows << Row{container, nameEdit, minSpin, maxSpin, iconBtn, QString()};
+        m_layout->addWidget(container);
+
+        // 连接要在 m_rows 追加之后，lambda 通过 container 反查当前行
+        int rowIdx = m_rows.size() - 1;
+        connect(iconBtn, &QPushButton::clicked, this, [this, rowIdx, iconBtn]() {
+            if (rowIdx >= 0 && rowIdx < m_rows.size()) {
+                QString path = QFileDialog::getOpenFileName(this, "选择图标图片", "",
+                    "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif *.svg)");
+                if (!path.isEmpty()) {
+                    m_rows[rowIdx].iconPath = path;
+                    iconBtn->setText("🖼");
+                    iconBtn->setToolTip("已导入图标");
                 }
             }
         });
-        hl->addWidget(delBtn);
 
         // Adjacency sync: when min changes, update previous row's max
         connect(minSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
@@ -162,8 +180,6 @@ private slots:
             }
         });
 
-        m_rows << Row{container, nameEdit, minSpin, maxSpin};
-        m_layout->addWidget(container);
     }
 
 private:
@@ -175,10 +191,12 @@ private:
     }
 
     struct Row {
-        QWidget   *container;
-        QLineEdit *nameEdit;
-        QSpinBox  *minSpin;
-        QSpinBox  *maxSpin;
+        QWidget     *container;
+        QLineEdit   *nameEdit;
+        QSpinBox    *minSpin;
+        QSpinBox    *maxSpin;
+        QPushButton *iconBtn;
+        QString      iconPath;
     };
     QList<Row>    m_rows;
     QVBoxLayout  *m_layout;
@@ -204,6 +222,44 @@ public:
         m_nameEdit->setPlaceholderText("例如: LED PAR 64");
         nameLayout->addWidget(m_nameEdit);
         root->addLayout(nameLayout);
+
+        // 图标
+        auto *iconLayout = new QHBoxLayout;
+        iconLayout->addWidget(new QLabel("图标:"));
+        m_iconPreview = new QLabel;
+        m_iconPreview->setFixedSize(32, 32);
+        m_iconPreview->setStyleSheet("background:#ddd;border-radius:16px;border:2px solid #bbb;color:#666;font-size:14px");
+        m_iconPreview->setAlignment(Qt::AlignCenter);
+        m_iconPreview->setText("灯");
+        iconLayout->addWidget(m_iconPreview);
+        auto *iconBtn = new QPushButton("选择图片");
+        iconBtn->setStyleSheet("background:#e8e8e8;color:#222;border:1px solid #bbb;border-radius:3px;padding:4px 10px;font-size:11px");
+        connect(iconBtn, &QPushButton::clicked, this, [this]() {
+            QString path = QFileDialog::getOpenFileName(this, "选择灯具图标", "",
+                "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif *.svg)");
+            if (!path.isEmpty()) {
+                m_iconPath = path;
+                QPixmap pm = centerCropToSquare(path, 32);
+                if (!pm.isNull()) {
+                    QPixmap circle(32, 32); circle.fill(Qt::transparent);
+                    QPainter pp(&circle); pp.setRenderHint(QPainter::Antialiasing);
+                    pp.setBrush(pm); pp.setPen(Qt::NoPen);
+                    pp.drawEllipse(0, 0, 32, 32); pp.end();
+                    m_iconPreview->setPixmap(circle);
+                }
+            }
+        });
+        iconLayout->addWidget(iconBtn);
+        auto *clearIconBtn = new QPushButton("清除");
+        clearIconBtn->setStyleSheet("background:#e8e8e8;color:#822;border:1px solid #bbb;border-radius:3px;padding:4px 10px;font-size:11px");
+        connect(clearIconBtn, &QPushButton::clicked, this, [this]() {
+            m_iconPath.clear();
+            m_iconPreview->setPixmap(QPixmap());
+            m_iconPreview->setText("灯");
+        });
+        iconLayout->addWidget(clearIconBtn);
+        iconLayout->addStretch();
+        root->addLayout(iconLayout);
 
         // 厂商
         auto *mfrLayout = new QHBoxLayout;
@@ -249,11 +305,23 @@ public:
         connect(cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
     }
 
+    static QPixmap centerCropToSquare(const QString &path, int targetSize)
+    {
+        QImage img(path);
+        if (img.isNull()) return QPixmap();
+        int w = img.width(), h = img.height();
+        int sq = qMin(w, h);
+        int x = (w - sq) / 2, y = (h - sq) / 2;
+        return QPixmap::fromImage(
+            img.copy(x, y, sq, sq).scaled(targetSize, targetSize, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+
     FixtureDef getFixtureDef() const
     {
         FixtureDef def;
         def.name = m_nameEdit->text();
         def.manufacturer = m_mfrEdit->text();
+        def.iconPath = m_iconPath;
         def.channels = m_chSpin->value();
         for (int i = 0; i < m_paramEdits.size(); i++)
             def.channelNames << (m_paramEdits[i]->text().isEmpty()
@@ -267,6 +335,17 @@ public:
         m_nameEdit->setText(def.name);
         m_mfrEdit->setText(def.manufacturer);
         m_chSpin->setValue(def.channels);
+        m_iconPath = def.iconPath;
+        if (!m_iconPath.isEmpty()) {
+            QPixmap pm = centerCropToSquare(m_iconPath, 32);
+            if (!pm.isNull()) {
+                QPixmap circle(32, 32); circle.fill(Qt::transparent);
+                QPainter pp(&circle); pp.setRenderHint(QPainter::Antialiasing);
+                pp.setBrush(pm); pp.setPen(Qt::NoPen);
+                pp.drawEllipse(0, 0, 32, 32); pp.end();
+                m_iconPreview->setPixmap(circle);
+            }
+        }
         rebuildParams(def.channels);
         for (int i = 0; i < def.channelNames.size(); i++)
             m_paramEdits[i]->setText(def.channelNames[i]);
@@ -277,6 +356,10 @@ public:
 private slots:
     void rebuildParams(int channels)
     {
+        // 保存旧的通道名称
+        QStringList oldNames;
+        for (auto *edit : m_paramEdits)
+            oldNames << edit->text();
         // 保存旧的范围
         QList<QList<ChannelRange>> oldRanges = m_paramRanges;
         m_paramRanges.clear();
@@ -295,10 +378,16 @@ private slots:
         for (int i = 0; i < channels; i++) {
             auto *edit = new QLineEdit;
             edit->setPlaceholderText(QString("通道 %1 名称").arg(i + 1));
+            // 恢复之前填过的通道名称
+            if (i < oldNames.size()) edit->setText(oldNames[i]);
             m_paramEdits << edit;
 
             auto *customBtn = new QPushButton("自定义");
             customBtn->setFixedWidth(60);
+            // 恢复已配(N)状态
+            int existingCnt = m_paramRanges[i].size();
+            if (existingCnt > 0)
+                customBtn->setText(QString("已配(%1)").arg(existingCnt));
             connect(customBtn, &QPushButton::clicked, this, [this, i, customBtn]() {
                 RangeDialog dlg(this);
                 if (i < m_paramRanges.size())
@@ -322,6 +411,8 @@ private:
     QLineEdit      *m_nameEdit;
     QLineEdit      *m_mfrEdit;
     QSpinBox       *m_chSpin;
+    QLabel         *m_iconPreview;
+    QString         m_iconPath;
     QWidget        *m_paramWidget;
     QFormLayout    *m_paramLayout;
     QList<QLineEdit *> m_paramEdits;
